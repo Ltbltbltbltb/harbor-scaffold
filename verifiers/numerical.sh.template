@@ -1,0 +1,38 @@
+#!/bin/bash
+# Verifier: numerical — extrai e valida valores numericos
+
+OUTPUT_FILE="/logs/agent/output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
+mkdir -p /logs/verifier
+
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "0" > "$REWARD_FILE"
+    exit 0
+fi
+
+OUTPUT=$(cat "$OUTPUT_FILE")
+SCORE=0
+TOTAL=3  # TODO: ajuste o total de checks
+
+# TODO: adicione checks para cada valor numerico esperado
+#
+# Formato com label:
+# VALOR=$(echo "$OUTPUT" | grep -oP 'Resultado:\s*\K[\d.]+' | head -1)
+# if [ "$VALOR" = "42" ]; then
+#     SCORE=$((SCORE + 1))
+# fi
+#
+# Formato com tolerancia (para floats):
+# VALOR=$(echo "$OUTPUT" | grep -oP 'Media:\s*\K[\d.]+' | head -1)
+# if python3 -c "v=$VALOR; ok=abs(v-6.8)<0.1; print('yes' if ok else 'no')" 2>/dev/null | grep -q "yes"; then
+#     SCORE=$((SCORE + 1))
+# fi
+#
+# Formato por posicao (sequencia na ultima linha):
+# LAST_LINE=$(echo "$OUTPUT" | tail -1)
+# EXPECTED="1, 1, 2, 3, 5, 8, 13, 21"
+# if echo "$LAST_LINE" | grep -qF "$EXPECTED"; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"

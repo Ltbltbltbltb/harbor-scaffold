@@ -1,0 +1,46 @@
+#!/bin/bash
+# Verifier: code_execution — extrai codigo Python, executa, verifica
+
+OUTPUT_FILE="/logs/agent/output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
+mkdir -p /logs/verifier
+
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "0" > "$REWARD_FILE"
+    exit 0
+fi
+
+# Extrai bloco de codigo Python (entre ```python e ```, ou tudo se nao tiver)
+if grep -q '```python' "$OUTPUT_FILE"; then
+    sed -n '/```python/,/```/p' "$OUTPUT_FILE" | sed '1d;$d' > /tmp/solution.py
+elif grep -q '```' "$OUTPUT_FILE"; then
+    sed -n '/```/,/```/p' "$OUTPUT_FILE" | sed '1d;$d' > /tmp/solution.py
+else
+    cp "$OUTPUT_FILE" /tmp/solution.py
+fi
+
+# TODO: Adicione testes ao final do codigo extraido
+cat >> /tmp/solution.py << 'PYEOF'
+
+# Tests
+# TODO: substitua pelos testes reais
+# result = minha_funcao("input")
+# assert isinstance(result, dict), "Deve retornar dict"
+# assert result["key"] == "expected", f"key={result['key']}, esperado expected"
+# print("ALL TESTS PASSED")
+PYEOF
+
+SCORE=0
+TOTAL=4  # TODO: ajuste o total
+
+# Check 1: TODO — funcao esperada esta definida
+# if grep -q "def minha_funcao" /tmp/solution.py; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+# Check 2-4: executa e verifica
+# if python3 /tmp/solution.py 2>/dev/null | grep -q "ALL TESTS PASSED"; then
+#     SCORE=$((SCORE + 3))
+# fi
+
+echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"

@@ -1,0 +1,28 @@
+# harbor-scaffold manifest — text-analyzer example
+# This is a complete, runnable example showing all concepts.
+
+project:
+  name: "text-analyzer"
+  path: "."
+  description: "Simple text analysis agent that counts words and detects sentiment"
+
+agent:
+  strategy: "direct"
+  class_name: "TextAnalyzerAgent"
+  agent_name: "text-analyzer-bench"
+  version: "0.1.0"
+  model: "claude-sonnet-4-6"
+  timeout: 120
+  max_retries: 3
+
+  # Backend: cli uses `claude -p` (no API key required with Claude Max)
+  # Switch to "api" and set ANTHROPIC_API_KEY for API access
+  backend: "cli"
+  # api_key_env: "ANTHROPIC_API_KEY"
+
+  system_prompt: |
+    You are a precise text analysis assistant. Follow the output format exactly as
+    specified in each task. Do not add explanations or extra text beyond the format.
+
+benchmark:
+  dockerfile_preset: "minimal"

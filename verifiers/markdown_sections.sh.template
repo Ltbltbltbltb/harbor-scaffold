@@ -1,0 +1,47 @@
+#!/bin/bash
+# Verifier: markdown_sections — valida estrutura markdown (headings, citacoes, word count)
+
+set -euo pipefail
+
+OUTPUT_FILE="/logs/agent/output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
+mkdir -p /logs/verifier
+
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "0" > "$REWARD_FILE"
+    exit 0
+fi
+
+OUTPUT=$(cat "$OUTPUT_FILE")
+SCORE=0
+TOTAL=5  # TODO: ajuste o total de checks
+
+# Check 1: tem markdown headers (## )
+if echo "$OUTPUT" | grep -q "^## "; then
+    SCORE=$((SCORE + 1))
+fi
+
+# Check 2: TODO — numero minimo de secoes (# ou ##)
+SECTIONS=$(echo "$OUTPUT" | grep -c "^#" || true)
+if [[ "$SECTIONS" -ge 3 ]]; then
+    SCORE=$((SCORE + 1))
+fi
+
+# Check 3: TODO — contagem minima de palavras
+WORDS=$(echo "$OUTPUT" | wc -w)
+if [[ "$WORDS" -ge 300 ]]; then
+    SCORE=$((SCORE + 1))
+fi
+
+# Check 4: TODO — citacoes no formato [N]
+# CITATIONS=$(echo "$OUTPUT" | grep -oP '\[\d+\]' | sort -u | wc -l)
+# if [[ "$CITATIONS" -ge 3 ]]; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+# Check 5: TODO — keywords obrigatorias no conteudo
+# if echo "$OUTPUT" | grep -qi "palavra-chave"; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"

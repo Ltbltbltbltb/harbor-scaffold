@@ -1,0 +1,5 @@
+[task]
+name = "text-analyzer/word-count"
+description = "Count words, sentences, and unique words in a given text"
+timeout = 120
+difficulty = "easy"

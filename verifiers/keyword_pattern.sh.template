@@ -1,0 +1,36 @@
+#!/bin/bash
+# Verifier: keyword_pattern — checa presenca/ausencia de padroes regex
+
+OUTPUT_FILE="/logs/agent/output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
+mkdir -p /logs/verifier
+
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "0" > "$REWARD_FILE"
+    exit 0
+fi
+
+SCORE=0
+TOTAL=4  # TODO: ajuste = len(required) + len(forbidden)
+
+# TODO: padroes OBRIGATORIOS (devem estar presentes)
+#
+# if grep -qiP "padrao_regex_1" "$OUTPUT_FILE"; then
+#     SCORE=$((SCORE + 1))
+# fi
+#
+# if grep -qiP "padrao_regex_2" "$OUTPUT_FILE"; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+# TODO: padroes PROIBIDOS (NAO devem estar presentes)
+#
+# if ! grep -qiP "padrao_proibido_1" "$OUTPUT_FILE"; then
+#     SCORE=$((SCORE + 1))
+# fi
+#
+# if ! grep -qiP "padrao_proibido_2" "$OUTPUT_FILE"; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"

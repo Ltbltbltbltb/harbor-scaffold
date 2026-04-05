@@ -1,0 +1,37 @@
+#!/bin/bash
+# Verifier: structured_text — extrai valores de labels no output
+# Formato esperado no output: "Label: valor"
+# NOTA: grep -P (Perl regex) NAO disponivel no Docker minimal. Use python3 para extracoes complexas.
+
+OUTPUT_FILE="/logs/agent/output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
+mkdir -p /logs/verifier
+
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "0" > "$REWARD_FILE"
+    exit 0
+fi
+
+SCORE=0
+TOTAL=3  # TODO: ajuste o total de checks
+
+# TODO: adicione checks para cada label esperado
+# Formato: extrair valor apos o label com grep -oP, comparar com esperado
+#
+# Exemplo:
+# MEDIA=$(grep -oP 'Media:\s*\K[\d.]+' "$OUTPUT_FILE" | head -1)
+# if [ "$MEDIA" = "6.8" ]; then
+#     SCORE=$((SCORE + 1))
+# fi
+#
+# TOTAL_VAL=$(grep -oP 'Total:\s*\K\d+' "$OUTPUT_FILE" | head -1)
+# if [ "$TOTAL_VAL" = "42" ]; then
+#     SCORE=$((SCORE + 1))
+# fi
+#
+# STATUS=$(grep -oiP 'Status:\s*\K\w+' "$OUTPUT_FILE" | head -1)
+# if echo "$STATUS" | grep -qi "aprovado"; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"

@@ -1,0 +1,5 @@
+[task]
+name = "text-analyzer/sentiment-label"
+description = "Classify the sentiment of a product review as positive, negative, or neutral"
+timeout = 120
+difficulty = "easy"

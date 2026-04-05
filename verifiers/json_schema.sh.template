@@ -1,0 +1,51 @@
+#!/bin/bash
+# Verifier: json_schema — valida estrutura JSON do output
+
+OUTPUT_FILE="/logs/agent/output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
+mkdir -p /logs/verifier
+
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "0" > "$REWARD_FILE"
+    exit 0
+fi
+
+# Remove markdown code blocks se presentes
+sed 's/```json//g' "$OUTPUT_FILE" | sed 's/```//g' | tr -d '\r' > /tmp/cleaned.json
+
+SCORE=0
+TOTAL=3  # TODO: ajuste o total de checks
+
+# Check 1: JSON valido (gate check — se falhar, score 0)
+if python3 -c "import json,sys; json.load(open('/tmp/cleaned.json'))" 2>/dev/null; then
+    SCORE=$((SCORE + 1))
+else
+    echo "scale=2; 0 / $TOTAL" | bc > "$REWARD_FILE"
+    exit 0
+fi
+
+# Check 2: TODO — campos obrigatorios presentes
+# Exemplo: verificar que campos 'name', 'value' existem
+# FIELDS_OK=$(python3 -c "
+# import json
+# d = json.load(open('/tmp/cleaned.json'))
+# required = {'name', 'value'}
+# ok = required.issubset(set(d.keys()))
+# print('yes' if ok else 'no')
+# " 2>/dev/null)
+# if [ "$FIELDS_OK" = "yes" ]; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+# Check 3: TODO — validacoes especificas (tipos, arrays, valores)
+# Exemplo: verificar que um array tem N itens
+# COUNT=$(python3 -c "
+# import json
+# d = json.load(open('/tmp/cleaned.json'))
+# print(len(d.get('items', [])))
+# " 2>/dev/null)
+# if [ "$COUNT" = "5" ]; then
+#     SCORE=$((SCORE + 1))
+# fi
+
+echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"

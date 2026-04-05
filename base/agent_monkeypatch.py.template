@@ -1,0 +1,169 @@
+"""%%AGENT_NAME%% — importa logica real do projeto, zero duplicacao.
+
+Estrategia: monkey-patch na funcao LLM do projeto para capturar o prompt
+exato que o bot construiria, e entao envia ao Claude pelo benchmark.
+Qualquer mudanca nos prompts do projeto se reflete automaticamente.
+"""
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+
+from harbor.agents.base import BaseAgent
+from harbor.environments.base import BaseEnvironment
+from harbor.models.agent.context import AgentContext
+
+# Adicionar raiz do projeto ao path para imports
+PROJECT_ROOT = "%%PROJECT_ROOT_PATH%%"
+MODULES_PATH = os.path.join(PROJECT_ROOT, "%%MODULES_PATH%%")
+sys.path.insert(0, PROJECT_ROOT)
+if MODULES_PATH != PROJECT_ROOT:
+    sys.path.insert(0, MODULES_PATH)
+
+# Modelo e timeout por role — espelha config real do projeto
+ROLE_CONFIG = {
+%%ROLE_CONFIG_ENTRIES%%
+}
+
+
+def _run_claude(prompt: str, model: str = "sonnet", timeout: int = 120) -> str:
+    """Chama claude -p com --output-format text (como o projeto real)."""
+    claude_cmd = os.environ.get("CLAUDE_CLI_PATH") or "claude"
+    for attempt in range(3):
+        try:
+            result = subprocess.run(
+                [
+                    claude_cmd,
+                    "-p",
+                    prompt,
+                    "--output-format",
+                    "text",
+                    "--max-turns",
+                    "1",
+                    "--tools",
+                    "",
+                    "--model",
+                    model,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                err = result.stderr.strip() or result.stdout.strip()
+                if "429" in err or "rate" in err.lower():
+                    if attempt < 2:
+                        time.sleep(30 * (attempt + 1))
+                        continue
+                raise RuntimeError(f"claude -p falhou: {err[:300]}")
+            return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            if attempt < 2:
+                time.sleep(10)
+                continue
+            raise RuntimeError(f"timeout {timeout}s")
+    raise RuntimeError("max retries")
+
+
+def _extract_json(text: str) -> str:
+    """Extrai JSON de texto livre."""
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        return text[start:end]
+    return text
+
+
+async def _build_prompt_via_monkey_patch(role: str, data: dict) -> tuple[str, str]:
+    """Importa a funcao real do projeto e captura o prompt que ela construiria.
+
+    Retorna (prompt_capturado, model_usado).
+    Usa monkey-patch na funcao LLM para interceptar sem chamar o LLM real.
+
+    TODO: Implemente o dispatch para cada role do seu projeto.
+
+    1. Importe o modulo que contem a funcao LLM
+    2. Substitua a funcao por uma fake que captura o prompt
+    3. Chame a funcao de entrada do projeto com os dados da task
+    4. Restaure a funcao original no finally
+
+    Exemplo:
+        import meu_modulo.core as core_mod
+        original = core_mod.%%LLM_FUNCTION%%
+
+        async def fake_llm(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["model"] = kwargs.get("model", "sonnet")
+            return '{"placeholder": true}'
+
+        core_mod.%%LLM_FUNCTION%% = fake_llm
+        try:
+            await core_mod.process(input_text=data["input_text"])
+        finally:
+            core_mod.%%LLM_FUNCTION%% = original
+    """
+    captured = {"prompt": None, "model": None}
+
+    # TODO: Implementar dispatch por role
+    # if role == "meu_role":
+    #     ...
+    raise NotImplementedError(
+        f"Dispatch para role '{role}' nao implementado. "
+        "Edite _build_prompt_via_monkey_patch() no agent.py."
+    )
+
+    return captured["prompt"], captured["model"]
+
+
+# ============================================================
+# [HARBOR ADAPTER - FIXO] — nao editar esta secao
+# ============================================================
+class %%CLASS_NAME%%(BaseAgent):
+    """Harbor agent que usa os prompts reais do projeto via import."""
+
+    @staticmethod
+    def name() -> str:
+        return "%%AGENT_NAME%%"
+
+    def version(self):
+        return "%%AGENT_VERSION%%"
+
+    async def setup(self, environment: BaseEnvironment) -> None:
+        await environment.exec("mkdir -p /logs/agent")
+
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        try:
+            data = json.loads(instruction)
+        except json.JSONDecodeError:
+            data = {"topic": instruction}
+
+        role = data.get("role", "generic")
+        config = ROLE_CONFIG.get(role, {"model": "sonnet", "timeout": 120})
+
+        if role == "generic":
+            output = _run_claude(instruction, config["model"], config["timeout"])
+        else:
+            prompt, model = await _build_prompt_via_monkey_patch(role, data)
+            if prompt is None:
+                raise RuntimeError(f"Falha ao capturar prompt para role={role}")
+
+            raw = _run_claude(prompt, model or config["model"], config["timeout"])
+
+            # Extrair JSON para roles que retornam JSON
+            if data.get("json_output", False):
+                output = _extract_json(raw)
+            else:
+                output = raw
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write(output)
+            tmp_path = f.name
+        await environment.upload_file(tmp_path, "/logs/agent/output.txt")
+        os.unlink(tmp_path)
+        context.metadata = {"output_length": len(output), "role": role}

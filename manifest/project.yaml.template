@@ -1,0 +1,60 @@
+# harbor-scaffold manifest — configuracao unica por projeto
+# Preencha os campos marcados com TODO
+
+project:
+  name: "{{PROJECT_SLUG}}"
+  path: "{{PROJECT_PATH}}"
+  description: "TODO: descricao curta do projeto"
+
+agent:
+  strategy: "{{STRATEGY}}"  # direct | monkeypatch | context_inject
+  class_name: "{{CLASS_NAME}}"
+  agent_name: "{{AGENT_NAME}}"
+  version: "0.1.0"
+  model: "claude-sonnet-4-6"
+  timeout: 300
+  max_retries: 3
+
+  # LLM backend: cli | api | openai_compat
+  # cli: uses `claude -p` CLI (works with Claude Max subscription, no API key required)
+  # api: uses Anthropic Python SDK (requires ANTHROPIC_API_KEY)
+  # openai_compat: uses OpenAI-compatible SDK (requires base_url + api_key_env)
+  backend: "cli"
+  # api_key_env: "ANTHROPIC_API_KEY"     # for backend: api
+  # base_url: "https://api.openai.com/v1"  # for backend: openai_compat
+  # api_key_env: "OPENAI_API_KEY"          # for backend: openai_compat
+
+  # System prompt (used by direct and context_inject; monkeypatch uses the project's own prompts)
+  system_prompt: |
+    TODO: escreva o system prompt base para o agente.
+    Este eh o principal ponto de otimizacao do meta-agente.
+
+  # === Configuracao para estrategia monkeypatch ===
+  # Descomente e preencha se strategy = monkeypatch
+  #
+  # monkeypatch:
+  #   project_modules_path: "src"     # path relativo ao project.path, adicionado ao sys.path
+  #   llm_function: "_ask_claude"     # nome da funcao LLM a interceptar
+  #   roles:
+  #     - name: "default"
+  #       module: "meu_modulo.core"       # modulo que contem a funcao de entrada
+  #       entry_function: "process"       # funcao que chama o LLM internamente
+  #       entry_kwargs: ["input_text"]    # kwargs esperados pela entry_function
+  #       model: "sonnet"                 # modelo que o bot usa para este role
+  #       timeout: 120
+  #       json_output: false              # se o output esperado eh JSON
+  #       stub_response: ""               # resposta fake para o monkey-patch nao crashar
+
+  # === Configuracao para estrategia context_inject ===
+  # Descomente e preencha se strategy = context_inject
+  #
+  # context_inject:
+  #   context_files:                  # arquivos do projeto cujo conteudo sera injetado no prompt
+  #     - "CLAUDE.md"
+  #     - "src/config.py"
+  #   inline_context: |
+  #     TODO: contexto adicional sobre o projeto (stack, convencoes, etc.)
+
+benchmark:
+  dockerfile_preset: "minimal"  # minimal | jq | custom
+  # custom_packages: ["nodejs", "curl"]  # so para preset custom
