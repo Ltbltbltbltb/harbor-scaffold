@@ -417,6 +417,9 @@ def _create_memory_loop_assets(
         "WIKI_MIN_PAGE_CHARS": str(memory["min_page_chars"]),
         "WIKI_MAX_PAIRS_PER_PAGE": str(memory["max_pairs_per_page"]),
         "RUNTIME_EXPORT_SCRIPT": memory["runtime_adapter"]["export_script"],
+        "BACKEND": agent.get("backend", "cli"),
+        "API_KEY_ENV": agent.get("api_key_env", "ANTHROPIC_API_KEY"),
+        "BASE_URL": agent.get("base_url", ""),
     }
 
     (bench_dir / "wiki.py").write_text(

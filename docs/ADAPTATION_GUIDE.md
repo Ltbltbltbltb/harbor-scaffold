@@ -138,6 +138,7 @@ Esse trilho foi desenhado para preservar a portabilidade do scaffold:
   - estrutura markdown da wiki
   - API generica de ingest/query/lint
   - sync de `wiki-recall`
+  - uso do mesmo backend configurado no benchmark
 - Parte especifica do projeto:
   - extracao de eventos reais do runtime
 

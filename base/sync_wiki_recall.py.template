@@ -4,10 +4,10 @@
 import argparse
 import hashlib
 import json
-import os
 import re
 import stat
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -18,10 +18,13 @@ WIKI_PAGES_DIR = WIKI_DIR / "pages"
 STATE_FILE = BENCH_DIR / "data" / ".wiki_sync_state"
 PROJECT_SLUG = "%%PROJECT_SLUG%%"
 AGENT_IMPORT_PATH = "agent:%%CLASS_NAME%%"
-CLAUDE_BIN = os.environ.get("CLAUDE_CLI_PATH", "claude")
 FACT_MODEL = "%%WIKI_SELECTOR_MODEL%%"
 MIN_PAGE_CHARS = %%WIKI_MIN_PAGE_CHARS%%
 MAX_PAIRS_PER_PAGE = %%WIKI_MAX_PAIRS_PER_PAGE%%
+
+sys.path.insert(0, str(BENCH_DIR))
+
+import wiki
 
 DOCKERFILE_CONTENT = """FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y bc python3 jq && apt-get clean
@@ -61,33 +64,6 @@ def save_sync_state(filename: str, hash_value: str) -> None:
         encoding="utf-8",
     )
 
-
-def _run_claude(prompt: str) -> str:
-    result = subprocess.run(
-        [
-            CLAUDE_BIN,
-            "-p",
-            prompt,
-            "--output-format",
-            "text",
-            "--max-turns",
-            "1",
-            "--tools",
-            "",
-            "--model",
-            FACT_MODEL,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=str(BENCH_DIR),
-    )
-    if result.returncode != 0:
-        err = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"claude -p failed: {err[:300]}")
-    return result.stdout.strip()
-
-
 def extract_facts_from_page(page_name: str, page_content: str) -> list[dict]:
     prompt = f"""Create benchmark questions from this wiki page.
 
@@ -114,7 +90,7 @@ Rules:
 """
 
     try:
-        raw = _run_claude(prompt)
+        raw = wiki.run_backend_prompt(prompt, FACT_MODEL, timeout=60)
     except RuntimeError as exc:
         print(f"  AVISO: extract_facts falhou para {page_name}: {exc}")
         return []
@@ -141,11 +117,8 @@ Rules:
 
 
 def _wiki_recall_verifier(key_terms: list[str]) -> str:
-    checks = "\n".join(
-        f'if echo "$OUTPUT" | grep -qi "{term}"; then\n    SCORE=$((SCORE + 1))\nfi'
-        for term in key_terms
-    )
     total = max(1, len(key_terms))
+    terms_literal = json.dumps(key_terms, ensure_ascii=False)
     return f"""#!/bin/bash
 OUTPUT_FILE="/logs/agent/output.txt"
 REWARD_FILE="/logs/verifier/reward.txt"
@@ -156,11 +129,22 @@ if [ ! -f "$OUTPUT_FILE" ]; then
     exit 0
 fi
 
-OUTPUT=$(cat "$OUTPUT_FILE")
-SCORE=0
 TOTAL={total}
+SCORE=$(python3 - <<'PY'
+import json
 
-{checks}
+terms = json.loads({terms_literal!r})
+with open("/logs/agent/output.txt", encoding="utf-8", errors="ignore") as file:
+    text = file.read().lower()
+
+score = 0
+for term in terms:
+    if str(term).lower() in text:
+        score += 1
+
+print(score)
+PY
+)
 
 echo "scale=4; $SCORE/$TOTAL" | bc > "$REWARD_FILE"
 """

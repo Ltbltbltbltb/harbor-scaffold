@@ -105,6 +105,7 @@ wiki pattern:
 - runtime knowledge can be compiled into a local wiki
 - the wiki can be queried or injected back as context
 - wiki pages can be converted into paired `no-wiki` vs `with-wiki` benchmark tasks
+- the wiki uses the same configured backend family as the benchmark (`cli`, `api`, or `openai_compat`)
 
 If `memory.runtime_adapter.enabled: true`, the scaffold also generates:
 
