@@ -60,6 +60,11 @@ benchmark:
   # custom_packages: ["nodejs", "curl"]  # so para preset custom
 
 # === Memory loop opcional (wiki estilo Karpathy + wiki-recall) ===
+# Quando habilitado, o benchmark deixa de ser apenas um conjunto fixo de tasks:
+# o projeto pode compilar conhecimento em uma wiki local, reutilizar essa wiki
+# como contexto e transformar paginas da wiki em novas tasks pareadas
+# `no-wiki` vs `with-wiki`. Isso fecha um ciclo de melhoria continua em cima
+# do benchmark principal.
 memory:
   enabled: false
   wiki_dir: "wiki"
@@ -73,6 +78,8 @@ memory:
 
   # Optional: gera apenas o protocolo/stub.
   # Voce precisa adaptar a extracao real do runtime do projeto.
+  # A intencao e manter o core portatil e deixar explicito o ponto de costura
+  # com o runtime especifico de cada aplicacao.
   runtime_adapter:
     enabled: false
     export_script: "scripts/export_runtime_events.py"
