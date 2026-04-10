@@ -156,7 +156,25 @@ harbor-scaffold/
     custom.Dockerfile
   docs/
     ADAPTATION_GUIDE.md
+  example/
+    README.md
+    manifest.yaml
+    agent.py
+    wiki.py
+    scripts/
+    tasks/
+    wiki/
 ```
+
+## Example
+
+The `example/` directory is a complete runnable benchmark called `text-analyzer`.
+It now demonstrates both:
+
+- a normal Harbor benchmark with two simple tasks
+- the optional wiki loop layout, including seeded wiki files and `sync_wiki_recall.py`
+
+See `example/README.md` for the exact commands.
 
 ## Notes
 

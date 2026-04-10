@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Generate wiki-recall task pairs from the local benchmark wiki."""
+
+import argparse
+import hashlib
+import json
+import re
+import stat
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+BENCH_DIR = Path(__file__).resolve().parent.parent
+TASKS_DIR = BENCH_DIR / "tasks"
+WIKI_DIR = BENCH_DIR / "wiki"
+WIKI_PAGES_DIR = WIKI_DIR / "pages"
+STATE_FILE = BENCH_DIR / "data" / ".wiki_sync_state"
+PROJECT_SLUG = "text-analyzer"
+AGENT_IMPORT_PATH = "agent:TextAnalyzerAgent"
+FACT_MODEL = "claude-sonnet-4-6"
+MIN_PAGE_CHARS = 500
+MAX_PAIRS_PER_PAGE = 2
+
+sys.path.insert(0, str(BENCH_DIR))
+
+import wiki
+
+DOCKERFILE_CONTENT = """FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y bc python3 jq && apt-get clean
+"""
+
+
+def slug(text: str) -> str:
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9\\s-]", "", text)
+    text = re.sub(r"\\s+", "-", text)
+    return text[:48]
+
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def get_sync_state() -> dict[str, str]:
+    if not STATE_FILE.exists():
+        return {}
+
+    state: dict[str, str] = {}
+    for line in STATE_FILE.read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        state[key.strip()] = value.strip()
+    return state
+
+
+def save_sync_state(filename: str, hash_value: str) -> None:
+    state = get_sync_state()
+    state[filename] = hash_value
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(
+        "\n".join(f"{key}={value}" for key, value in sorted(state.items())) + "\n",
+        encoding="utf-8",
+    )
+
+def extract_facts_from_page(page_name: str, page_content: str) -> list[dict]:
+    prompt = f"""Create benchmark questions from this wiki page.
+
+Page name:
+{page_name}
+
+Page content:
+{page_content[:3000]}
+
+Return ONLY a JSON array with up to {MAX_PAIRS_PER_PAGE} objects:
+[
+  {{
+    "question": "specific question about a narrow fact",
+    "fact_slug": "short-kebab-case-slug",
+    "key_terms": ["term1", "term2"]
+  }}
+]
+
+Rules:
+- Prefer facts with names, dates, numbers, or distinctive entities
+- Avoid generic knowledge the base model likely already knows
+- key_terms must be short tokens expected in a correct answer
+- No extra text
+"""
+
+    try:
+        raw = wiki.run_backend_prompt(prompt, FACT_MODEL, timeout=60)
+    except RuntimeError as exc:
+        print(f"  AVISO: extract_facts falhou para {page_name}: {exc}")
+        return []
+
+    match = re.search(r"\[[\s\S]*\]", raw)
+    if not match:
+        return []
+
+    try:
+        parsed = json.loads(match.group())
+    except json.JSONDecodeError:
+        return []
+
+    valid = []
+    for item in parsed[:MAX_PAIRS_PER_PAGE]:
+        if not isinstance(item, dict):
+            continue
+        if not all(key in item for key in ("question", "fact_slug", "key_terms")):
+            continue
+        if not isinstance(item["key_terms"], list) or len(item["key_terms"]) < 2:
+            continue
+        valid.append(item)
+    return valid
+
+
+def _wiki_recall_verifier(key_terms: list[str]) -> str:
+    total = max(1, len(key_terms))
+    terms_literal = json.dumps(key_terms, ensure_ascii=False)
+    return f"""#!/bin/bash
+OUTPUT_FILE="/logs/agent/output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
+mkdir -p /logs/verifier
+
+if [ ! -f "$OUTPUT_FILE" ]; then
+    echo "0" > "$REWARD_FILE"
+    exit 0
+fi
+
+TOTAL={total}
+SCORE=$(python3 - <<'PY'
+import json
+
+terms = json.loads({terms_literal!r})
+with open("/logs/agent/output.txt", encoding="utf-8", errors="ignore") as file:
+    text = file.read().lower()
+
+score = 0
+for term in terms:
+    if str(term).lower() in text:
+        score += 1
+
+print(score)
+PY
+)
+
+echo "scale=4; $SCORE/$TOTAL" | bc > "$REWARD_FILE"
+"""
+
+
+def create_wiki_recall_pair(page_name: str, page_content: str, fact: dict) -> tuple[str, str]:
+    page_slug = slug(page_name.replace(".md", ""))[:25]
+    fact_slug = slug(fact["fact_slug"])[:20]
+    base_name = f"wiki-recall-{page_slug}-{fact_slug}"
+    name_no = f"{base_name}-no-wiki"
+    name_with = f"{base_name}-with-wiki"
+
+    instruction_no = (
+        "Answer the question directly and specifically.\\n\\n"
+        f"Question: {fact['question']}\\n\\n"
+        "Use only the facts you already know."
+    )
+
+    instruction_with = (
+        "You have access to the wiki context below.\\n\\n"
+        f"## Wiki Context\\n\\n{page_content[:3000]}\\n\\n"
+        f"## Question\\n\\n{fact['question']}\\n\\n"
+        "Use the wiki context to answer directly and specifically."
+    )
+
+    for task_name, instruction in (
+        (name_no, instruction_no),
+        (name_with, instruction_with),
+    ):
+        task_dir = TASKS_DIR / task_name
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "tests").mkdir(exist_ok=True)
+        (task_dir / "environment").mkdir(exist_ok=True)
+
+        task_type = "with-wiki" if task_name.endswith("with-wiki") else "no-wiki"
+        (task_dir / "task.toml").write_text(
+            f'[task]\\nname = "{PROJECT_SLUG}/{task_name}"\\n'
+            f'description = "Wiki recall: {fact["question"][:80]}"\\n'
+            f'type = "wiki-recall-{task_type}"\\n',
+            encoding="utf-8",
+        )
+        (task_dir / "instruction.md").write_text(instruction, encoding="utf-8")
+
+        test_path = task_dir / "tests" / "test.sh"
+        test_path.write_text(_wiki_recall_verifier(fact["key_terms"]), encoding="utf-8")
+        test_path.chmod(test_path.stat().st_mode | stat.S_IEXEC)
+
+        (task_dir / "environment" / "Dockerfile").write_text(
+            DOCKERFILE_CONTENT, encoding="utf-8"
+        )
+
+    return name_no, name_with
+
+
+def sync_wiki_pages(create: bool = False) -> int:
+    if not WIKI_PAGES_DIR.exists():
+        print(f"Wiki pages nao encontrado: {WIKI_PAGES_DIR}")
+        return 0
+
+    pages = sorted(WIKI_PAGES_DIR.glob("*.md"))
+    if not pages:
+        print("Nenhuma pagina na wiki ainda.")
+        return 0
+
+    state = get_sync_state()
+    pairs_count = 0
+    print(f"Wiki pages encontradas: {len(pages)}")
+
+    for page_path in pages:
+        content = page_path.read_text(encoding="utf-8")
+
+        if len(content) < MIN_PAGE_CHARS:
+            print(f"  SKIP (muito curta, {len(content)} chars): {page_path.name}")
+            continue
+
+        hash_value = content_hash(content)
+        if state.get(page_path.name) == hash_value:
+            print(f"  OK (sem mudancas): {page_path.name}")
+            continue
+
+        print(f"  NOVA/MODIFICADA: {page_path.name} ({len(content)} chars)")
+
+        if not create:
+            print(
+                f"  DRY-RUN: extrairia fatos e criaria ate {MAX_PAIRS_PER_PAGE} pares de tasks"
+            )
+            pairs_count += 1
+            continue
+
+        facts = extract_facts_from_page(page_path.name, content)
+        if not facts:
+            print(f"  AVISO: nenhum fato extraido para {page_path.name}, pulando")
+            continue
+
+        for fact in facts:
+            page_slug = slug(page_path.name.replace(".md", ""))[:25]
+            fact_slug = slug(fact["fact_slug"])[:20]
+            existing = TASKS_DIR / f"wiki-recall-{page_slug}-{fact_slug}-no-wiki"
+            if existing.exists():
+                print(f"  SKIP (ja existe): {existing.name}")
+                continue
+
+            name_no, name_with = create_wiki_recall_pair(page_path.name, content, fact)
+            print(f"  CRIADO par: {name_no}")
+            print(f"              {name_with}")
+            pairs_count += 1
+
+        save_sync_state(page_path.name, hash_value)
+
+    return pairs_count
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sync local wiki pages into wiki-recall benchmark tasks."
+    )
+    parser.add_argument(
+        "--create", action="store_true", help="Actually create tasks (default: dry-run)"
+    )
+    parser.add_argument("--run", action="store_true", help="Run Harbor after creating tasks")
+    args = parser.parse_args()
+
+    count = sync_wiki_pages(create=args.create)
+    if not args.create:
+        print(f"Dry-run: {count} page(s) would generate task pairs.")
+        return
+
+    print(f"Total: {count} pair(s) created.")
+
+    if args.run and count > 0:
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "harbor",
+                "run",
+                "-p",
+                "tasks/",
+                "-n",
+                "1",
+                "--agent-import-path",
+                AGENT_IMPORT_PATH,
+                "-o",
+                "jobs",
+                "--job-name",
+                f"wiki-sync-{datetime.now().strftime('%Y%m%d-%H%M')}",
+            ],
+            cwd=str(BENCH_DIR),
+            check=False,
+        )
+
+
+if __name__ == "__main__":
+    main()

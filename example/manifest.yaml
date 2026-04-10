@@ -26,3 +26,18 @@ agent:
 
 benchmark:
   dockerfile_preset: "minimal"
+
+memory:
+  enabled: true
+  wiki_dir: "wiki"
+  language: "en"
+  selector_model: "claude-sonnet-4-6"
+  writer_model: "claude-sonnet-4-6"
+  max_context_chars: 4000
+  sync_wiki_recall: true
+  min_page_chars: 500
+  max_pairs_per_page: 2
+
+  runtime_adapter:
+    enabled: false
+    export_script: "scripts/export_runtime_events.py"

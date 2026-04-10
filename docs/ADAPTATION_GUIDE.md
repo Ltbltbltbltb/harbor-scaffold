@@ -166,6 +166,8 @@ python scripts/sync_runtime_to_wiki.py --apply   # so se houver adapter
 
 Importante: o scaffold gera o protocolo e o stub. A captura do runtime real continua sendo adaptacao local do projeto.
 
+Veja tambem `example/` no repo para um benchmark pequeno que inclui a estrutura do wiki loop sem depender de adapter de runtime.
+
 ## Tipos de verifier
 
 | Tipo | Quando usar | Dockerfile |

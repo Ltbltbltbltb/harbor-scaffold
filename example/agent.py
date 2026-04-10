@@ -1,9 +1,9 @@
-"""text-analyzer-bench — direct strategy: sends the task instruction directly to an LLM.
+"""text-analyzer-bench - direct strategy: sends the task instruction directly to an LLM.
 
 Supports 3 backends:
-  cli          — uses `claude -p` (works with Claude Max, no API key required)
-  api          — uses Anthropic Python SDK (requires ANTHROPIC_API_KEY)
-  openai_compat — uses OpenAI-compatible SDK (requires BASE_URL + API key env var)
+  cli           - uses `claude -p`
+  api           - uses Anthropic Python SDK
+  openai_compat - uses an OpenAI-compatible endpoint
 
 Meta-agent may edit everything above the [HARBOR ADAPTER - FIXO] boundary.
 """
@@ -19,27 +19,24 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 # ============================================================
-# SYSTEM PROMPT — primary optimization surface for the meta-agent
+# SYSTEM PROMPT - primary optimization surface
 # ============================================================
 SYSTEM_PROMPT = """You are a precise text analysis assistant. Follow the output format exactly as
-specified in each task. Do not add explanations or extra text beyond the format."""
+specified in each task. Do not add explanations or extra text beyond the format.
+"""
 
 # ============================================================
 # Runner configuration
 # ============================================================
-BACKEND = "cli"  # cli | api | openai_compat
+BACKEND = "cli"
 CLAUDE_MODEL = "claude-sonnet-4-6"
 CLAUDE_TIMEOUT = 120
 CLAUDE_MAX_RETRIES = 3
-
-# For backend=api: set ANTHROPIC_API_KEY in environment
-# For backend=openai_compat: set BASE_URL and the api_key env var
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 BASE_URL = ""
 
 
 def _run_cli(prompt: str) -> str:
-    """Call claude -p as subprocess. Works with Claude Max plan, no API key needed."""
     for attempt in range(CLAUDE_MAX_RETRIES):
         try:
             result = subprocess.run(
@@ -84,7 +81,6 @@ def _run_cli(prompt: str) -> str:
 
 
 def _run_api(prompt: str) -> str:
-    """Call Anthropic API via Python SDK. Requires: pip install anthropic"""
     try:
         import anthropic
     except ImportError:
@@ -108,8 +104,8 @@ def _run_api(prompt: str) -> str:
                 messages=[{"role": "user", "content": prompt}],
             )
             return message.content[0].text.strip()
-        except Exception as e:
-            err = str(e)
+        except Exception as exc:
+            err = str(exc)
             if "429" in err or "rate" in err.lower():
                 if attempt < CLAUDE_MAX_RETRIES - 1:
                     time.sleep(30 * (attempt + 1))
@@ -120,7 +116,6 @@ def _run_api(prompt: str) -> str:
 
 
 def _run_openai_compat(prompt: str) -> str:
-    """Call any OpenAI-compatible API endpoint. Requires: pip install openai"""
     try:
         from openai import OpenAI
     except ImportError:
@@ -144,8 +139,8 @@ def _run_openai_compat(prompt: str) -> str:
                 timeout=CLAUDE_TIMEOUT,
             )
             return response.choices[0].message.content.strip()
-        except Exception as e:
-            err = str(e)
+        except Exception as exc:
+            err = str(exc)
             if "429" in err or "rate" in err.lower():
                 if attempt < CLAUDE_MAX_RETRIES - 1:
                     time.sleep(30 * (attempt + 1))
@@ -156,25 +151,21 @@ def _run_openai_compat(prompt: str) -> str:
 
 
 def run_llm(instruction: str) -> str:
-    """Dispatch to the configured backend."""
-    prompt = (
-        f"{SYSTEM_PROMPT}\n\n{instruction}" if SYSTEM_PROMPT.strip() else instruction
-    )
+    prompt = f"{SYSTEM_PROMPT}\n\n{instruction}" if SYSTEM_PROMPT.strip() else instruction
 
     if BACKEND == "cli":
         return _run_cli(prompt)
-    elif BACKEND == "api":
+    if BACKEND == "api":
         return _run_api(prompt)
-    elif BACKEND == "openai_compat":
+    if BACKEND == "openai_compat":
         return _run_openai_compat(prompt)
-    else:
-        raise RuntimeError(
-            f"Unknown backend: {BACKEND!r}. Choose cli | api | openai_compat"
-        )
+    raise RuntimeError(
+        f"Unknown backend: {BACKEND!r}. Choose cli | api | openai_compat"
+    )
 
 
 # ============================================================
-# [HARBOR ADAPTER - FIXO] — do not edit this section
+# [HARBOR ADAPTER - FIXO] - do not edit this section
 # ============================================================
 class TextAnalyzerAgent(BaseAgent):
     """Harbor-compatible agent (direct strategy)."""
@@ -197,9 +188,9 @@ class TextAnalyzerAgent(BaseAgent):
     ) -> None:
         output = run_llm(instruction)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write(output)
-            tmp_path = f.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as file:
+            file.write(output)
+            tmp_path = file.name
 
         await environment.upload_file(tmp_path, "/logs/agent/output.txt")
         os.unlink(tmp_path)
