@@ -1,5 +1,6 @@
 #!/bin/bash
 # Verifier: markdown_sections — valida estrutura markdown (headings, citacoes, word count)
+# Baseado em um padrao generico de relatorio em markdown
 
 set -euo pipefail
 

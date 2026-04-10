@@ -14,6 +14,7 @@ O harbor-scaffold gera benchmarks Harbor para qualquer projeto. Este guia explic
 5. Preencher instruction.md + test.sh # parte manual
 6. scaffold.py doctor                 # validar tudo
 7. uv run harbor run ...              # rodar benchmark
+8. (Opcional) habilitar memory loop   # wiki + wiki-recall
 ```
 
 ## Tier 1: Zero esforco (auto-gerado)
@@ -34,7 +35,9 @@ Campos obrigatorios:
 - `project.name` — slug do projeto (auto-preenchido)
 - `project.path` — caminho absoluto (auto-preenchido)
 - `agent.strategy` — direct, monkeypatch, ou context_inject (auto-detectado)
+- `agent.backend` — `cli`, `api`, ou `openai_compat` para direct/context_inject
 - `agent.system_prompt` — prompt base (so para direct e context_inject)
+- `memory.enabled` — habilite se quiser o trilho opcional de wiki loop
 
 ### instruction.md (por task)
 
@@ -60,7 +63,9 @@ O scaffold gera o preamble + footer. Voce preenche:
 
 A mais simples. O agent.py recebe a instrucao e passa pro Claude com o SYSTEM_PROMPT.
 
-**O que editar**: apenas o `system_prompt` no manifest. Comece generico e itere.
+**O que editar**:
+1. `system_prompt`
+2. `backend` se quiser usar API em vez de `claude -p`
 
 ### Estrategia: monkeypatch
 
@@ -117,6 +122,48 @@ Intermediaria — injeta contexto do projeto no prompt sem importar codigo.
 1. `context_files` no manifest — lista de arquivos do projeto a injetar
 2. `inline_context` — descricao da stack, convencoes, anti-patterns
 3. `system_prompt` — prompt base que recebe o contexto + instrucao
+4. `backend` se quiser usar API em vez de `claude -p`
+
+## Trilho opcional: wiki loop
+
+Se `memory.enabled: true`, o scaffold gera uma camada de memoria portatil dentro do benchmark:
+
+- `wiki.py` — API e CLI para `ingest`, `query`, `context` e `lint`
+- `wiki/SCHEMA.md`, `wiki/index.md`, `wiki/log.md`, `wiki/pages/`
+- `scripts/sync_wiki_recall.py` — transforma paginas da wiki em pares de tasks `no-wiki` e `with-wiki`
+
+Esse trilho foi desenhado para preservar a portabilidade do scaffold:
+
+- Parte portatil:
+  - estrutura markdown da wiki
+  - API generica de ingest/query/lint
+  - sync de `wiki-recall`
+- Parte especifica do projeto:
+  - extracao de eventos reais do runtime
+
+Se voce tambem habilitar `memory.runtime_adapter.enabled: true`, o scaffold gera:
+
+- `scripts/export_runtime_events.py` — stub que define o contrato do adapter
+- `scripts/sync_runtime_to_wiki.py` — bridge generica do adapter para a wiki
+
+O contrato do adapter e simples: retornar uma lista de eventos com:
+
+- `event_id`
+- `topic`
+- `summary`
+- `facts` (opcional)
+- `sources` (opcional)
+
+Fluxo sugerido:
+
+```bash
+cd harbor-bench
+python wiki.py lint
+python scripts/sync_wiki_recall.py --create
+python scripts/sync_runtime_to_wiki.py --apply   # so se houver adapter
+```
+
+Importante: o scaffold gera o protocolo e o stub. A captura do runtime real continua sendo adaptacao local do projeto.
 
 ## Tipos de verifier
 
@@ -139,3 +186,4 @@ Use `jq` no Dockerfile se o verifier usar `jq` em vez de `python3` para JSON.
 - Use `scaffold.py doctor` apos cada alteracao
 - O SYSTEM_PROMPT eh a principal superficie de otimizacao — itere nele
 - UTF-8 em grep pode falhar no Docker sem locale — use alternativas ASCII
+- O wiki loop eh opcional: habilite apenas quando fizer sentido medir memoria compilada ou reaproveitar conhecimento entre runs

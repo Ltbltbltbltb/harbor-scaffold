@@ -1,5 +1,6 @@
 #!/bin/bash
 # Verifier: json_schema — valida estrutura JSON do output
+# Baseado em um padrao generico de output JSON estruturado
 
 OUTPUT_FILE="/logs/agent/output.txt"
 REWARD_FILE="/logs/verifier/reward.txt"

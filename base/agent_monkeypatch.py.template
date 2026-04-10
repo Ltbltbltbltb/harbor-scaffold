@@ -85,6 +85,7 @@ async def _build_prompt_via_monkey_patch(role: str, data: dict) -> tuple[str, st
     Usa monkey-patch na funcao LLM para interceptar sem chamar o LLM real.
 
     TODO: Implemente o dispatch para cada role do seu projeto.
+    Use um modulo real do projeto como referencia:
 
     1. Importe o modulo que contem a funcao LLM
     2. Substitua a funcao por uma fake que captura o prompt

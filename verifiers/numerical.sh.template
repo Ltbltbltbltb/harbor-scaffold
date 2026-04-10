@@ -1,5 +1,6 @@
 #!/bin/bash
 # Verifier: numerical — extrai e valida valores numericos
+# Baseado em um padrao generico de verificacao numerica
 
 OUTPUT_FILE="/logs/agent/output.txt"
 REWARD_FILE="/logs/verifier/reward.txt"

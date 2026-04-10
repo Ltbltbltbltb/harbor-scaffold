@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Bridge project-specific runtime events into the portable wiki loop."""
+
+import argparse
+import importlib.util
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+EXPORT_SCRIPT = ROOT / "%%RUNTIME_EXPORT_SCRIPT%%"
+sys.path.insert(0, str(ROOT))
+
+import wiki
+
+
+def _load_export_module():
+    spec = importlib.util.spec_from_file_location("runtime_export_events", EXPORT_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Nao foi possivel carregar adapter: {EXPORT_SCRIPT}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _normalize_event(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise TypeError(f"Evento invalido: {raw!r}")
+
+    event_id = raw.get("event_id")
+    topic = raw.get("topic")
+    summary = raw.get("summary")
+    if not event_id or not topic or not summary:
+        raise ValueError(
+            "Cada evento precisa ter event_id, topic e summary preenchidos"
+        )
+
+    return {
+        "event_id": str(event_id),
+        "topic": str(topic),
+        "summary": str(summary),
+        "facts": raw.get("facts") or [],
+        "sources": raw.get("sources") or [],
+    }
+
+
+def load_events() -> list[dict]:
+    module = _load_export_module()
+    if not hasattr(module, "export_events"):
+        raise RuntimeError(
+            f"O adapter {EXPORT_SCRIPT} precisa definir export_events()"
+        )
+
+    events = module.export_events()
+    if not isinstance(events, list):
+        raise TypeError("export_events() precisa retornar list[dict]")
+    return [_normalize_event(item) for item in events]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sync adapter-exported runtime events into the benchmark wiki."
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply ingestions to the wiki (default: dry-run summary)",
+    )
+    args = parser.parse_args()
+
+    events = load_events()
+    print(f"Eventos carregados do adapter: {len(events)}")
+
+    for event in events:
+        if not args.apply:
+            print(f"  DRY-RUN: {event['event_id']} :: {event['topic']}")
+            continue
+
+        changed = wiki.ingest(
+            event_id=event["event_id"],
+            topic=event["topic"],
+            summary=event["summary"],
+            facts=event["facts"],
+            sources=event["sources"],
+        )
+        status = "UPDATED" if changed else "NO-CHANGES"
+        print(f"  {status}: {event['event_id']} :: {event['topic']}")
+
+
+if __name__ == "__main__":
+    main()
