@@ -7,6 +7,11 @@ AI agent evaluation framework.
 on prompt tuning, task design, and verifier quality instead of rebuilding the
 same structure for each project.
 
+The updated version is not only a benchmark scaffold. It can also generate an
+optional memory loop around the benchmark, so the same project can accumulate
+knowledge, reuse that knowledge as context, and turn that accumulated knowledge
+into new benchmark tasks.
+
 ## LLM backends
 
 For `direct` and `context_inject`, the scaffold supports:
@@ -32,6 +37,31 @@ agent:
 4. `doctor` validates the manifest, generated files, and task structure
 5. Optional: generate a portable wiki loop for compiled memory and `wiki-recall`
    benchmark tasks
+
+## Why this is interesting
+
+Most public projects in this area focus on one layer only:
+
+- benchmark and eval infrastructure
+- persistent memory
+- compiled wiki workflows
+
+`harbor-scaffold` is designed to connect those layers inside one portable
+project template.
+
+The core loop is:
+
+1. benchmark the agent on explicit tasks
+2. compile useful project knowledge into a local wiki
+3. query or inject that wiki back as context
+4. convert wiki pages into paired `no-wiki` vs `with-wiki` benchmark tasks
+5. use the benchmark results to improve prompts, tasks, and memory strategy
+
+That makes the scaffold useful not only for static evaluation, but also for
+iterative improvement. In practice, it becomes a loop on top of another loop:
+the project produces knowledge, the wiki compiles that knowledge, the benchmark
+tests whether that knowledge helps, and the next benchmark iteration improves
+the project again.
 
 ## Quickstart
 
@@ -107,6 +137,11 @@ wiki pattern:
 - wiki pages can be converted into paired `no-wiki` vs `with-wiki` benchmark tasks
 - the wiki uses the same configured backend family as the benchmark (`cli`, `api`, or `openai_compat`)
 
+The goal is not just to store notes. The wiki loop exists to make project
+knowledge measurable. Once pages can be turned into paired tasks, you can check
+whether the compiled memory is actually improving the agent or just creating
+more files.
+
 If `memory.runtime_adapter.enabled: true`, the scaffold also generates:
 
 - `scripts/export_runtime_events.py`
@@ -123,6 +158,7 @@ This scaffold is designed around portability and practical iteration:
 - direct support for `direct`, `context_inject`, and `monkeypatch`
 - reusable verifier templates
 - optional memory loop without coupling to any single project
+- explicit boundary between the portable core and the project-specific runtime adapter
 
 ## Repository structure
 
@@ -169,9 +205,9 @@ harbor-scaffold/
 ## Example
 
 The `example/` directory is a complete runnable benchmark called `text-analyzer`.
-It now demonstrates both:
+It demonstrates both:
 
-- a normal Harbor benchmark with two simple tasks
+- a normal Harbor benchmark with simple tasks
 - the optional wiki loop layout, including seeded wiki files and `sync_wiki_recall.py`
 
 See `example/README.md` for the exact commands.

@@ -4,6 +4,22 @@
 
 O harbor-scaffold gera benchmarks Harbor para qualquer projeto. Este guia explica o que fazer apos rodar os comandos do scaffold.
 
+Na versao atual, ele pode operar em dois niveis:
+
+- benchmark Harbor portatil
+- memory loop opcional em markdown wiki
+
+Juntos, esses dois niveis formam um sistema fechado:
+
+- o projeto e avaliado por tasks explicitas
+- o conhecimento util pode ser compilado na wiki
+- a wiki pode voltar como contexto
+- a wiki tambem pode virar novas tasks `no-wiki` vs `with-wiki`
+- o resultado dessas tasks informa a proxima iteracao do benchmark
+
+Em outras palavras, o scaffold nao organiza so um benchmark. Ele organiza um
+loop de melhoria continua em cima do benchmark.
+
 ## Fluxo completo
 
 ```
@@ -16,6 +32,26 @@ O harbor-scaffold gera benchmarks Harbor para qualquer projeto. Este guia explic
 7. uv run harbor run ...              # rodar benchmark
 8. (Opcional) habilitar memory loop   # wiki + wiki-recall
 ```
+
+## Fluxo sistemico
+
+Quando o trilho de memoria esta ligado, o fluxo deixa de ser linear e passa a
+ser ciclico:
+
+```text
+runtime/projeto
+  -> wiki local
+  -> sync_wiki_recall
+  -> tasks no-wiki vs with-wiki
+  -> harbor run
+  -> resultados
+  -> ajuste de prompt, task, verifier e memoria
+  -> runtime/projeto novamente
+```
+
+Essa e a ideia central do repo: nao apenas medir um agente, mas criar uma
+estrutura para ele aprender com o proprio historico de execucao e provar se
+esse aprendizado ajudou.
 
 ## Tier 1: Zero esforco (auto-gerado)
 
@@ -132,6 +168,16 @@ Se `memory.enabled: true`, o scaffold gera uma camada de memoria portatil dentro
 - `wiki/SCHEMA.md`, `wiki/index.md`, `wiki/log.md`, `wiki/pages/`
 - `scripts/sync_wiki_recall.py` — transforma paginas da wiki em pares de tasks `no-wiki` e `with-wiki`
 
+O ponto importante aqui e que a wiki nao e tratada como documentacao passiva.
+Ela entra no mesmo circuito de engenharia do benchmark:
+
+- conhecimento novo pode ir para a wiki
+- a wiki pode voltar como contexto para o agente
+- a wiki pode gerar novas tasks de avaliacao
+- essas tasks medem se a memoria compilada esta ajudando de verdade
+
+Por isso faz sentido pensar nesse trilho como um "loop sobre loops".
+
 Esse trilho foi desenhado para preservar a portabilidade do scaffold:
 
 - Parte portatil:
@@ -160,6 +206,7 @@ Fluxo sugerido:
 ```bash
 cd harbor-bench
 python wiki.py lint
+python wiki.py ingest --topic "example" --summary "..."   # opcional
 python scripts/sync_wiki_recall.py --create
 python scripts/sync_runtime_to_wiki.py --apply   # so se houver adapter
 ```
@@ -167,6 +214,24 @@ python scripts/sync_runtime_to_wiki.py --apply   # so se houver adapter
 Importante: o scaffold gera o protocolo e o stub. A captura do runtime real continua sendo adaptacao local do projeto.
 
 Veja tambem `example/` no repo para um benchmark pequeno que inclui a estrutura do wiki loop sem depender de adapter de runtime.
+
+## O que e portatil e o que nao e
+
+Para manter a proposta do scaffold, a divisao de responsabilidades e explicita:
+
+- Portatil:
+  - estrutura do benchmark Harbor
+  - templates de `agent.py`
+  - wiki markdown compilada
+  - `sync_wiki_recall.py`
+  - contrato do runtime adapter
+- Especifico do projeto:
+  - como capturar eventos reais
+  - quais fatos entram na wiki
+  - quais fontes ou artefatos fazem sentido no dominio
+
+Essa separacao e parte do valor do repo. Ela permite reaproveitar o sistema em
+outros projetos sem fingir que o runtime de todos os projetos e igual.
 
 ## Tipos de verifier
 
@@ -190,3 +255,4 @@ Use `jq` no Dockerfile se o verifier usar `jq` em vez de `python3` para JSON.
 - O SYSTEM_PROMPT eh a principal superficie de otimizacao — itere nele
 - UTF-8 em grep pode falhar no Docker sem locale — use alternativas ASCII
 - O wiki loop eh opcional: habilite apenas quando fizer sentido medir memoria compilada ou reaproveitar conhecimento entre runs
+- Se ativar o wiki loop, trate as paginas como insumo de benchmark, nao como arquivo morto
