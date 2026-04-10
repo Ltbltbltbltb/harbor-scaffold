@@ -1,0 +1,513 @@
+"""Portable wiki loop for Harbor benchmarks.
+
+This module gives a benchmark-local memory layer that can be reused by any
+project. It keeps a markdown wiki, can compile new knowledge into pages, and
+can serve the wiki back as context.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+WIKI_DIR = BASE_DIR / "wiki"
+SCHEMA_PATH = WIKI_DIR / "SCHEMA.md"
+INDEX_PATH = WIKI_DIR / "index.md"
+LOG_PATH = WIKI_DIR / "log.md"
+PAGES_DIR = WIKI_DIR / "pages"
+
+WIKI_LANGUAGE = "en"
+SELECTOR_MODEL = "claude-sonnet-4-6"
+WRITER_MODEL = "claude-sonnet-4-6"
+MAX_CONTEXT_CHARS = 4000
+BACKEND = "cli"
+API_KEY_ENV = "ANTHROPIC_API_KEY"
+BASE_URL = ""
+CLAUDE_BIN = os.environ.get("CLAUDE_CLI_PATH", "claude")
+
+DEFAULT_SCHEMA = """# Project Wiki Schema
+
+## Purpose
+This wiki accumulates durable project knowledge between benchmark runs and runtime
+sessions. Each page should compress repeated evidence into a stable, reusable form.
+
+## Files
+- `index.md` - master index of pages and covered topics
+- `log.md` - append-only ingestion log (newest entry on top)
+- `pages/*.md` - one page per topic cluster
+
+## Page Shape
+```
+# Topic Title
+
+_Last updated: YYYY-MM-DD | Events: N_
+
+## Summary
+2-3 paragraphs with the highest-confidence current view.
+
+## Key Facts
+- [HIGH] Claim supported by multiple events or sources
+- [MEDIUM] Claim supported by one strong event/source
+- [LOW] Claim still tentative
+
+## Open Questions
+- What is still unknown or weakly supported?
+
+## Source Trail
+| Date | Event ID | Contribution |
+|------|----------|--------------|
+```
+
+## Rules
+1. Prefer updating an existing page over creating a near-duplicate.
+2. Preserve historical nuance; do not silently delete conflicting evidence.
+3. Keep `index.md` and `log.md` in sync with page changes.
+4. Write pages in en unless the project requires another language.
+5. Never write files outside `index.md`, `log.md`, or `pages/*.md`.
+"""
+
+DEFAULT_INDEX = """# Wiki Index
+
+This index is maintained by the wiki loop.
+
+## Pages
+_No pages yet._
+"""
+
+DEFAULT_LOG = """# Wiki Log
+
+Append-only change log. New entries go on top.
+"""
+
+
+def _run_cli(prompt: str, model: str, timeout: int = 90) -> str:
+    result = subprocess.run(
+        [
+            CLAUDE_BIN,
+            "-p",
+            prompt,
+            "--output-format",
+            "text",
+            "--max-turns",
+            "1",
+            "--tools",
+            "",
+            "--model",
+            model,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"claude -p failed ({result.returncode}): {err[:300]}")
+    return result.stdout.strip()
+
+
+def _run_api(prompt: str, model: str, timeout: int = 90) -> str:
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError(
+            "anthropic package not installed. Add 'anthropic' to pyproject.toml dependencies."
+        )
+
+    api_key = os.environ.get(API_KEY_ENV)
+    if not api_key:
+        raise RuntimeError(
+            f"API key not found. Set the {API_KEY_ENV} environment variable."
+        )
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    for attempt in range(3):
+        try:
+            message = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return message.content[0].text.strip()
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                if attempt < 2:
+                    time.sleep(30 * (attempt + 1))
+                    continue
+            raise RuntimeError(f"Anthropic API error: {err[:300]}")
+
+    raise RuntimeError("Anthropic API: max retries exceeded")
+
+
+def _run_openai_compat(prompt: str, model: str, timeout: int = 90) -> str:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError(
+            "openai package not installed. Add 'openai' to pyproject.toml dependencies."
+        )
+
+    api_key = os.environ.get(API_KEY_ENV)
+    if not api_key:
+        raise RuntimeError(
+            f"API key not found. Set the {API_KEY_ENV} environment variable."
+        )
+
+    client = OpenAI(api_key=api_key, base_url=BASE_URL or None)
+
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                if attempt < 2:
+                    time.sleep(30 * (attempt + 1))
+                    continue
+            raise RuntimeError(f"OpenAI-compat API error: {err[:300]}")
+
+    raise RuntimeError("OpenAI-compat API: max retries exceeded")
+
+
+def run_backend_prompt(prompt: str, model: str, timeout: int = 90) -> str:
+    if BACKEND == "cli":
+        return _run_cli(prompt, model, timeout)
+    if BACKEND == "api":
+        return _run_api(prompt, model, timeout)
+    if BACKEND == "openai_compat":
+        return _run_openai_compat(prompt, model, timeout)
+    raise RuntimeError(
+        f"Unknown backend: {BACKEND!r}. Choose cli | api | openai_compat"
+    )
+
+
+def _parse_json_array(text: str) -> list[str]:
+    match = re.search(r"\[[\s\S]*\]", text)
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group())
+    except json.JSONDecodeError:
+        return []
+    return [item for item in data if isinstance(item, str)]
+
+
+def _parse_file_blocks(output: str) -> dict[str, str]:
+    files: dict[str, str] = {}
+    current_path = None
+    current_lines: list[str] = []
+
+    for line in output.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("===FILE:") and stripped.endswith("==="):
+            if current_path is not None:
+                files[current_path] = "".join(current_lines).strip()
+            current_path = stripped[len("===FILE:") : -3].strip()
+            current_lines = []
+            continue
+        if current_path is not None:
+            current_lines.append(line)
+
+    if current_path is not None:
+        files[current_path] = "".join(current_lines).strip()
+    return files
+
+
+def _safe_write(relative_path: str, content: str) -> bool:
+    target = (WIKI_DIR / relative_path).resolve()
+    wiki_root = WIKI_DIR.resolve()
+
+    if not str(target).startswith(str(wiki_root)):
+        return False
+
+    allowed_direct = {INDEX_PATH.resolve(), LOG_PATH.resolve()}
+    in_pages = str(target).startswith(str(PAGES_DIR.resolve()))
+    if target not in allowed_direct and not in_pages:
+        return False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, target)
+    return True
+
+
+def ensure_wiki_structure() -> None:
+    WIKI_DIR.mkdir(exist_ok=True)
+    PAGES_DIR.mkdir(exist_ok=True)
+    if not SCHEMA_PATH.exists():
+        SCHEMA_PATH.write_text(DEFAULT_SCHEMA, encoding="utf-8")
+    if not INDEX_PATH.exists():
+        INDEX_PATH.write_text(DEFAULT_INDEX, encoding="utf-8")
+    if not LOG_PATH.exists():
+        LOG_PATH.write_text(DEFAULT_LOG, encoding="utf-8")
+
+
+def _read_pages(page_names: list[str]) -> dict[str, str]:
+    pages: dict[str, str] = {}
+    for name in page_names:
+        page_path = (WIKI_DIR / name).resolve()
+        if not str(page_path).startswith(str(PAGES_DIR.resolve())):
+            continue
+        if page_path.exists():
+            pages[name] = page_path.read_text(encoding="utf-8")
+    return pages
+
+
+def _select_relevant_pages(topic_or_question: str) -> list[str]:
+    ensure_wiki_structure()
+    index_content = INDEX_PATH.read_text(encoding="utf-8")
+    prompt = f"""You maintain a project wiki.
+
+Wiki index:
+{index_content}
+
+User request:
+{topic_or_question}
+
+Return ONLY a JSON array of relevant page paths such as:
+["pages/example-topic.md"]
+
+Rules:
+- Return [] if no page is relevant
+- Use only paths that already exist in the index
+- No extra text
+"""
+
+    try:
+        return _parse_json_array(run_backend_prompt(prompt, SELECTOR_MODEL, timeout=45))
+    except RuntimeError:
+        return []
+
+
+def _format_facts(facts: list[dict] | None) -> str:
+    if not facts:
+        return "- None"
+
+    lines = []
+    for fact in facts[:12]:
+        if isinstance(fact, dict):
+            claim = fact.get("claim") or fact.get("text") or json.dumps(fact, ensure_ascii=False)
+            confidence = fact.get("confidence", "medium")
+            lines.append(f"- [{confidence}] {claim}")
+        else:
+            lines.append(f"- {fact}")
+    return "\n".join(lines)
+
+
+def _format_sources(sources: list[dict] | None) -> str:
+    if not sources:
+        return "- None"
+
+    lines = []
+    for source in sources[:10]:
+        if isinstance(source, dict):
+            title = source.get("title", "untitled")
+            url = source.get("url", "")
+            note = source.get("note") or source.get("content", "")
+            if note:
+                lines.append(f"- {title} ({url}) :: {str(note)[:240]}")
+            else:
+                lines.append(f"- {title} ({url})")
+        else:
+            lines.append(f"- {source}")
+    return "\n".join(lines)
+
+
+def ingest(
+    event_id: str,
+    topic: str,
+    summary: str,
+    facts: list[dict] | None = None,
+    sources: list[dict] | None = None,
+) -> bool:
+    ensure_wiki_structure()
+
+    index_content = INDEX_PATH.read_text(encoding="utf-8")
+    log_content = LOG_PATH.read_text(encoding="utf-8")
+    schema_content = SCHEMA_PATH.read_text(encoding="utf-8")
+    selected_pages = _select_relevant_pages(topic)
+    relevant_pages = _read_pages(selected_pages[:3])
+    pages_block = "\n\n".join(
+        f"--- {name} ---\n{content}" for name, content in relevant_pages.items()
+    )
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    prompt = f"""You are maintaining a compiled project wiki.
+
+Schema:
+{schema_content}
+
+Current index:
+{index_content}
+
+Current log:
+{log_content[:4000]}
+
+Relevant pages:
+{pages_block or "None"}
+
+New event:
+- Event ID: {event_id}
+- Timestamp: {timestamp}
+- Topic: {topic}
+- Summary: {summary}
+
+Facts:
+{_format_facts(facts)}
+
+Sources:
+{_format_sources(sources)}
+
+Return ONLY file blocks in this exact format:
+===FILE: index.md===
+...
+===FILE: log.md===
+...
+===FILE: pages/some-page.md===
+...
+
+Rules:
+- Update existing pages when possible
+- Create a new page only if the topic clearly does not fit existing pages
+- Keep the wiki language as en
+- Add the newest log entry at the top of log.md
+- Do not emit any file outside index.md, log.md, or pages/*.md
+"""
+
+    output = run_backend_prompt(prompt, WRITER_MODEL, timeout=120)
+    file_blocks = _parse_file_blocks(output)
+    wrote_any = False
+
+    for relative_path, content in file_blocks.items():
+        if _safe_write(relative_path, content):
+            wrote_any = True
+
+    return wrote_any
+
+
+def get_context_for_topic(
+    topic: str,
+    max_pages: int = 3,
+    max_chars: int = MAX_CONTEXT_CHARS,
+) -> str:
+    ensure_wiki_structure()
+    selected_pages = _select_relevant_pages(topic)[:max_pages]
+    relevant_pages = _read_pages(selected_pages)
+
+    chunks: list[str] = []
+    used_chars = 0
+    for name, content in relevant_pages.items():
+        chunk = f"--- {name} ---\n{content}\n"
+        if used_chars + len(chunk) > max_chars:
+            break
+        chunks.append(chunk)
+        used_chars += len(chunk)
+    return "\n".join(chunks).strip()
+
+
+def query(question: str) -> str:
+    context = get_context_for_topic(question)
+    if not context:
+        return "No relevant wiki context found."
+
+    prompt = f"""Answer the question using ONLY the wiki context below.
+If the wiki does not contain enough information, say so explicitly.
+
+Question:
+{question}
+
+Wiki context:
+{context}
+"""
+    return run_backend_prompt(prompt, WRITER_MODEL, timeout=90)
+
+
+def lint() -> str:
+    ensure_wiki_structure()
+    page_summaries = []
+    for page_path in sorted(PAGES_DIR.glob("*.md"))[:12]:
+        page_summaries.append(
+            f"--- {page_path.name} ---\n{page_path.read_text(encoding='utf-8')[:3000]}"
+        )
+
+    prompt = f"""Audit this project wiki for quality issues.
+
+Schema:
+{SCHEMA_PATH.read_text(encoding="utf-8")}
+
+Index:
+{INDEX_PATH.read_text(encoding="utf-8")}
+
+Log:
+{LOG_PATH.read_text(encoding="utf-8")[:3000]}
+
+Pages:
+{chr(10).join(page_summaries) or "No pages yet."}
+
+Return a concise audit with:
+- Structural problems
+- Contradictions or stale claims
+- Orphan or duplicate pages
+- Missing high-value pages
+- Recommended next cleanup actions
+"""
+    return run_backend_prompt(prompt, WRITER_MODEL, timeout=120)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Portable wiki loop helper.")
+    sub = parser.add_subparsers(dest="command", help="Subcommands")
+
+    p_ingest = sub.add_parser("ingest", help="Ingest a new event into the wiki")
+    p_ingest.add_argument("--event-id", required=True)
+    p_ingest.add_argument("--topic", required=True)
+    p_ingest.add_argument("--summary", required=True)
+    p_ingest.add_argument("--facts-json", default="[]")
+    p_ingest.add_argument("--sources-json", default="[]")
+
+    p_query = sub.add_parser("query", help="Ask a question against the wiki")
+    p_query.add_argument("question")
+
+    p_context = sub.add_parser("context", help="Fetch wiki context for a topic")
+    p_context.add_argument("topic")
+
+    sub.add_parser("lint", help="Audit the current wiki")
+
+    args = parser.parse_args()
+    ensure_wiki_structure()
+
+    if args.command == "ingest":
+        facts = json.loads(args.facts_json)
+        sources = json.loads(args.sources_json)
+        changed = ingest(
+            event_id=args.event_id,
+            topic=args.topic,
+            summary=args.summary,
+            facts=facts,
+            sources=sources,
+        )
+        print("updated" if changed else "no_changes")
+    elif args.command == "query":
+        print(query(args.question))
+    elif args.command == "context":
+        print(get_context_for_topic(args.topic))
+    elif args.command == "lint":
+        print(lint())
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
