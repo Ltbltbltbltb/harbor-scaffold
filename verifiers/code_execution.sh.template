@@ -1,5 +1,6 @@
 #!/bin/bash
 # Verifier: code_execution — extrai codigo Python, executa, verifica
+# Baseado em um padrao generico de task de codigo Python
 
 OUTPUT_FILE="/logs/agent/output.txt"
 REWARD_FILE="/logs/verifier/reward.txt"

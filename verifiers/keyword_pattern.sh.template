@@ -1,5 +1,6 @@
 #!/bin/bash
 # Verifier: keyword_pattern — checa presenca/ausencia de padroes regex
+# Baseado em checks genericos de padrao e palavra-chave
 
 OUTPUT_FILE="/logs/agent/output.txt"
 REWARD_FILE="/logs/verifier/reward.txt"

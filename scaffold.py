@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""harbor-scaffold — gerador portatil de benchmarks Harbor.
+"""harbor-scaffold - gerador portatil de benchmarks Harbor.
 
 Uso:
     scaffold.py init <project-dir>              Escaneia projeto, gera manifest.yaml
@@ -13,13 +13,12 @@ import ast
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
-from string import Template
 
 SCAFFOLD_DIR = Path(__file__).parent
 VALID_STRATEGIES = ("direct", "monkeypatch", "context_inject")
+VALID_BACKENDS = ("cli", "api", "openai_compat")
 VALID_VERIFIERS = (
     "json_schema",
     "structured_text",
@@ -34,124 +33,281 @@ VALID_DOCKERFILES = ("minimal", "jq", "custom")
 # ============================================================
 # YAML simplificado (sem deps externas)
 # ============================================================
+def _strip_inline_comment(text: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+
+    for idx, char in enumerate(text):
+        if char == "\\" and not escaped:
+            escaped = True
+            continue
+        if char == "'" and not in_double and not escaped:
+            in_single = not in_single
+        elif char == '"' and not in_single and not escaped:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double:
+            if idx == 0 or text[idx - 1].isspace():
+                return text[:idx].rstrip()
+        escaped = False
+
+    return text.rstrip()
+
+
+def _parse_scalar(raw_value: str):
+    value = _strip_inline_comment(raw_value).strip()
+    if value == "":
+        return ""
+
+    if value.startswith('"') and value.endswith('"'):
+        return value[1:-1]
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1]
+
+    lowered = value.lower()
+    if lowered in ("true", "yes"):
+        return True
+    if lowered in ("false", "no"):
+        return False
+    if lowered in ("null", "none"):
+        return None
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?\d+\.\d+", value):
+        return float(value)
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        parts = [part.strip() for part in inner.split(",")]
+        return [_parse_scalar(part) for part in parts]
+    return value
+
+
+def _line_indent(raw_line: str) -> int:
+    return len(raw_line) - len(raw_line.lstrip(" "))
+
+
+def _skip_yaml_noise(lines: list[str], index: int) -> int:
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped and not stripped.startswith("#"):
+            break
+        index += 1
+    return index
+
+
+def _parse_yaml_multiline(lines: list[str], index: int, parent_indent: int) -> tuple[str, int]:
+    content_indent = parent_indent + 2
+    buffer: list[str] = []
+
+    while index < len(lines):
+        raw = lines[index]
+        if not raw.strip():
+            buffer.append("")
+            index += 1
+            continue
+
+        indent = _line_indent(raw)
+        if indent <= parent_indent:
+            break
+
+        if len(raw) >= content_indent:
+            buffer.append(raw[content_indent:])
+        else:
+            buffer.append("")
+        index += 1
+
+    return "\n".join(buffer).rstrip("\n"), index
+
+
+def _parse_yaml_dict(lines: list[str], index: int, indent: int) -> tuple[dict, int]:
+    result: dict = {}
+
+    while True:
+        index = _skip_yaml_noise(lines, index)
+        if index >= len(lines):
+            break
+
+        raw = lines[index]
+        current_indent = _line_indent(raw)
+        if current_indent < indent:
+            break
+        if current_indent != indent:
+            break
+
+        stripped = raw.strip()
+        if stripped.startswith("- "):
+            break
+
+        match = re.match(r"^([\w.-]+):\s*(.*)$", stripped)
+        if not match:
+            index += 1
+            continue
+
+        key = match.group(1)
+        value_text = _strip_inline_comment(match.group(2).strip())
+
+        if value_text in ("|", ">"):
+            value, index = _parse_yaml_multiline(lines, index + 1, current_indent)
+        elif value_text == "":
+            next_index = _skip_yaml_noise(lines, index + 1)
+            if next_index < len(lines) and _line_indent(lines[next_index]) > current_indent:
+                value, index = _parse_yaml_block(
+                    lines, next_index, _line_indent(lines[next_index])
+                )
+            else:
+                value = {}
+                index += 1
+        else:
+            value = _parse_scalar(value_text)
+            index += 1
+
+        result[key] = value
+
+    return result, index
+
+
+def _parse_yaml_list(lines: list[str], index: int, indent: int) -> tuple[list, int]:
+    result: list = []
+
+    while True:
+        index = _skip_yaml_noise(lines, index)
+        if index >= len(lines):
+            break
+
+        raw = lines[index]
+        current_indent = _line_indent(raw)
+        if current_indent < indent:
+            break
+        if current_indent != indent:
+            break
+
+        stripped = raw.strip()
+        if not stripped.startswith("- "):
+            break
+
+        item_text = _strip_inline_comment(stripped[2:].strip())
+
+        if item_text == "":
+            next_index = _skip_yaml_noise(lines, index + 1)
+            if next_index < len(lines) and _line_indent(lines[next_index]) > current_indent:
+                item, index = _parse_yaml_block(
+                    lines, next_index, _line_indent(lines[next_index])
+                )
+            else:
+                item = ""
+                index += 1
+            result.append(item)
+            continue
+
+        key_match = re.match(r"^([\w.-]+):\s*(.*)$", item_text)
+        if key_match:
+            item: dict = {}
+            key = key_match.group(1)
+            value_text = _strip_inline_comment(key_match.group(2).strip())
+
+            if value_text in ("|", ">"):
+                item[key], index = _parse_yaml_multiline(lines, index + 1, current_indent)
+            elif value_text == "":
+                next_index = _skip_yaml_noise(lines, index + 1)
+                if next_index < len(lines) and _line_indent(lines[next_index]) > current_indent:
+                    item[key], index = _parse_yaml_block(
+                        lines, next_index, _line_indent(lines[next_index])
+                    )
+                else:
+                    item[key] = {}
+                    index += 1
+            else:
+                item[key] = _parse_scalar(value_text)
+                index += 1
+
+            next_index = _skip_yaml_noise(lines, index)
+            if next_index < len(lines):
+                next_indent = _line_indent(lines[next_index])
+                if next_indent > current_indent and not lines[next_index].strip().startswith("- "):
+                    extra, index = _parse_yaml_dict(lines, next_index, next_indent)
+                    item.update(extra)
+
+            result.append(item)
+            continue
+
+        result.append(_parse_scalar(item_text))
+        index += 1
+
+    return result, index
+
+
+def _parse_yaml_block(lines: list[str], index: int, indent: int):
+    index = _skip_yaml_noise(lines, index)
+    if index >= len(lines):
+        return {}, index
+
+    stripped = lines[index].strip()
+    if stripped.startswith("- "):
+        return _parse_yaml_list(lines, index, indent)
+    return _parse_yaml_dict(lines, index, indent)
+
+
 def _parse_yaml(path: Path) -> dict:
-    """Parser YAML minimalista para manifests simples (sem arrays inline complexos)."""
+    """Parser YAML minimalista para manifests simples."""
     try:
         import yaml
 
-        with open(path) as f:
-            return yaml.safe_load(f)
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
     except ImportError:
         pass
-    # Fallback: parser manual para YAML flat/nested simples
-    result: dict = {}
-    stack: list[tuple[int, dict]] = [(-1, result)]
-    multiline_key = None
-    multiline_indent = 0
-    multiline_buf: list[str] = []
 
-    with open(path) as f:
-        for line in f:
-            raw = line.rstrip("\n")
-
-            # Multiline string (| ou >)
-            if multiline_key is not None:
-                stripped = raw.lstrip()
-                indent = len(raw) - len(stripped)
-                if indent > multiline_indent or (not stripped and multiline_buf):
-                    multiline_buf.append(
-                        raw[multiline_indent:] if len(raw) > multiline_indent else ""
-                    )
-                    continue
-                else:
-                    stack[-1][1][multiline_key] = "\n".join(multiline_buf).rstrip("\n")
-                    multiline_key = None
-
-            stripped = raw.lstrip()
-            if not stripped or stripped.startswith("#"):
-                continue
-
-            indent = len(raw) - len(stripped)
-
-            # Pop stack to correct nesting level
-            while len(stack) > 1 and indent <= stack[-1][0]:
-                stack.pop()
-
-            m = re.match(r"^(\w[\w.-]*):\s*(.*)", stripped)
-            if not m:
-                continue
-
-            key = m.group(1)
-            val = m.group(2).strip()
-
-            if val == "" or val.endswith(":"):
-                # Nested dict
-                new_dict: dict = {}
-                stack[-1][1][key] = new_dict
-                stack.append((indent, new_dict))
-            elif val in ("|", ">"):
-                multiline_key = key
-                multiline_indent = indent + 2
-                multiline_buf = []
-            else:
-                # Scalar value
-                if val.startswith('"') and val.endswith('"'):
-                    val = val[1:-1]
-                elif val.startswith("'") and val.endswith("'"):
-                    val = val[1:-1]
-                elif val.lower() in ("true", "yes"):
-                    val = True
-                elif val.lower() in ("false", "no"):
-                    val = False
-                elif re.match(r"^\d+$", val):
-                    val = int(val)
-                elif re.match(r"^\d+\.\d+$", val):
-                    val = float(val)
-                stack[-1][1][key] = val
-
-        # Flush remaining multiline
-        if multiline_key is not None:
-            stack[-1][1][multiline_key] = "\n".join(multiline_buf).rstrip("\n")
-
-    return result
+    lines = path.read_text(encoding="utf-8").splitlines()
+    parsed, _ = _parse_yaml_block(lines, 0, 0)
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _dump_yaml_simple(data: dict, indent: int = 0) -> str:
     """Serializa dict para YAML simples."""
     lines = []
     prefix = "  " * indent
-    for k, v in data.items():
-        if isinstance(v, dict):
-            lines.append(f"{prefix}{k}:")
-            lines.append(_dump_yaml_simple(v, indent + 1))
-        elif isinstance(v, str) and "\n" in v:
-            lines.append(f"{prefix}{k}: |")
-            for vline in v.split("\n"):
+    for key, value in data.items():
+        if isinstance(value, dict):
+            lines.append(f"{prefix}{key}:")
+            lines.append(_dump_yaml_simple(value, indent + 1))
+        elif isinstance(value, str) and "\n" in value:
+            lines.append(f"{prefix}{key}: |")
+            for vline in value.split("\n"):
                 lines.append(f"{prefix}  {vline}")
-        elif isinstance(v, bool):
-            lines.append(f"{prefix}{k}: {'true' if v else 'false'}")
-        elif isinstance(v, list):
-            lines.append(f"{prefix}{k}:")
-            for item in v:
+        elif isinstance(value, bool):
+            lines.append(f"{prefix}{key}: {'true' if value else 'false'}")
+        elif isinstance(value, list):
+            lines.append(f"{prefix}{key}:")
+            for item in value:
                 if isinstance(item, dict):
                     first = True
-                    for ik, iv in item.items():
+                    for item_key, item_value in item.items():
                         if first:
-                            lines.append(f"{prefix}  - {ik}: {_quote_if_needed(iv)}")
+                            lines.append(
+                                f"{prefix}  - {item_key}: {_quote_if_needed(item_value)}"
+                            )
                             first = False
                         else:
-                            lines.append(f"{prefix}    {ik}: {_quote_if_needed(iv)}")
+                            lines.append(
+                                f"{prefix}    {item_key}: {_quote_if_needed(item_value)}"
+                            )
                 else:
                     lines.append(f"{prefix}  - {_quote_if_needed(item)}")
         else:
-            lines.append(f"{prefix}{k}: {_quote_if_needed(v)}")
+            lines.append(f"{prefix}{key}: {_quote_if_needed(value)}")
     return "\n".join(lines)
 
 
-def _quote_if_needed(val) -> str:
-    if isinstance(val, str) and (" " in val or ":" in val or val == ""):
-        return f'"{val}"'
-    return str(val)
+def _quote_if_needed(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str) and (" " in value or ":" in value or value == ""):
+        return f'"{value}"'
+    return str(value)
 
 
 # ============================================================
@@ -171,31 +327,151 @@ def _detect_strategy(project_dir: Path) -> str:
     pattern = "|".join(llm_patterns)
 
     py_files = list(project_dir.rglob("*.py"))
-    # Excluir venv, __pycache__, .git
     py_files = [
-        f
-        for f in py_files
+        path
+        for path in py_files
         if not any(
-            part in f.parts
+            part in path.parts
             for part in ("venv", ".venv", "__pycache__", ".git", "node_modules")
         )
     ]
 
     hits = []
-    for pf in py_files[:200]:  # limitar para projetos grandes
+    for py_file in py_files[:200]:
         try:
-            content = pf.read_text(errors="ignore")
+            content = py_file.read_text(errors="ignore")
             for match in re.finditer(pattern, content):
-                hits.append((pf.relative_to(project_dir), match.group()))
+                hits.append((py_file.relative_to(project_dir), match.group()))
         except OSError:
             continue
 
     if hits:
         return "monkeypatch"
-    # Checa se tem CLAUDE.md (sugere context_inject)
     if (project_dir / "CLAUDE.md").exists():
         return "context_inject"
     return "direct"
+
+
+def _render_template(template_path: Path, replacements: dict[str, str]) -> str:
+    content = template_path.read_text(encoding="utf-8")
+    for key, value in replacements.items():
+        content = content.replace(f"%%{key}%%", str(value))
+    return content
+
+
+def _memory_defaults(agent: dict, memory_cfg: dict | None) -> dict:
+    cfg = dict(memory_cfg or {})
+    defaults = {
+        "enabled": False,
+        "wiki_dir": "wiki",
+        "language": "pt-BR",
+        "selector_model": agent.get("model", "claude-sonnet-4-6"),
+        "writer_model": agent.get("model", "claude-sonnet-4-6"),
+        "max_context_chars": 4000,
+        "sync_wiki_recall": True,
+        "min_page_chars": 500,
+        "max_pairs_per_page": 2,
+    }
+    for key, value in defaults.items():
+        cfg.setdefault(key, value)
+
+    runtime_cfg = dict(cfg.get("runtime_adapter") or {})
+    runtime_cfg.setdefault("enabled", False)
+    runtime_cfg.setdefault("export_script", "scripts/export_runtime_events.py")
+    cfg["runtime_adapter"] = runtime_cfg
+    return cfg
+
+
+def _write_if_missing(path: Path, content: str) -> None:
+    if not path.exists():
+        path.write_text(content, encoding="utf-8")
+
+
+def _create_memory_loop_assets(
+    bench_dir: Path,
+    project: dict,
+    agent: dict,
+    memory: dict,
+) -> None:
+    wiki_dir_name = memory["wiki_dir"]
+    wiki_dir = bench_dir / wiki_dir_name
+    pages_dir = wiki_dir / "pages"
+    scripts_dir = bench_dir / "scripts"
+    data_dir = bench_dir / "data"
+
+    wiki_dir.mkdir(exist_ok=True)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    scripts_dir.mkdir(exist_ok=True)
+    data_dir.mkdir(exist_ok=True)
+    _write_if_missing(pages_dir / ".gitkeep", "")
+    _write_if_missing(data_dir / ".gitkeep", "")
+
+    replacements = {
+        "PROJECT_SLUG": project.get("name", "myproject"),
+        "CLASS_NAME": agent.get("class_name", "ProjectBenchAgent"),
+        "WIKI_DIR": wiki_dir_name,
+        "WIKI_LANGUAGE": memory["language"],
+        "WIKI_SELECTOR_MODEL": memory["selector_model"],
+        "WIKI_WRITER_MODEL": memory["writer_model"],
+        "WIKI_MAX_CONTEXT_CHARS": str(memory["max_context_chars"]),
+        "WIKI_MIN_PAGE_CHARS": str(memory["min_page_chars"]),
+        "WIKI_MAX_PAIRS_PER_PAGE": str(memory["max_pairs_per_page"]),
+        "RUNTIME_EXPORT_SCRIPT": memory["runtime_adapter"]["export_script"],
+        "BACKEND": agent.get("backend", "cli"),
+        "API_KEY_ENV": agent.get("api_key_env", "ANTHROPIC_API_KEY"),
+        "BASE_URL": agent.get("base_url", ""),
+    }
+
+    (bench_dir / "wiki.py").write_text(
+        _render_template(SCAFFOLD_DIR / "base" / "wiki.py.template", replacements),
+        encoding="utf-8",
+    )
+
+    _write_if_missing(
+        wiki_dir / "SCHEMA.md",
+        _render_template(SCAFFOLD_DIR / "base" / "wiki_SCHEMA.md.template", replacements),
+    )
+    _write_if_missing(
+        wiki_dir / "index.md",
+        _render_template(SCAFFOLD_DIR / "base" / "wiki_index.md.template", replacements),
+    )
+    _write_if_missing(
+        wiki_dir / "log.md",
+        _render_template(SCAFFOLD_DIR / "base" / "wiki_log.md.template", replacements),
+    )
+
+    if memory["sync_wiki_recall"]:
+        sync_wiki_path = scripts_dir / "sync_wiki_recall.py"
+        sync_wiki_path.write_text(
+            _render_template(
+                SCAFFOLD_DIR / "base" / "sync_wiki_recall.py.template",
+                replacements,
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(sync_wiki_path, 0o755)
+
+    if memory["runtime_adapter"]["enabled"]:
+        export_path = bench_dir / memory["runtime_adapter"]["export_script"]
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        export_path.write_text(
+            _render_template(
+                SCAFFOLD_DIR / "base" / "export_runtime_events.py.template",
+                replacements,
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(export_path, 0o755)
+
+        sync_runtime_path = scripts_dir / "sync_runtime_to_wiki.py"
+        sync_runtime_path.write_text(
+            _render_template(
+                SCAFFOLD_DIR / "base" / "sync_runtime_to_wiki.py.template",
+                replacements,
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(sync_runtime_path, 0o755)
 
 
 # ============================================================
@@ -214,23 +490,20 @@ def cmd_init(args):
 
     manifest_path = bench_dir / "manifest.yaml"
 
-    # Detectar estrategia
     strategy = _detect_strategy(project_dir)
     slug = project_dir.name.replace(" ", "-").lower()
 
-    # Copiar template e preencher
     template_path = SCAFFOLD_DIR / "manifest" / "project.yaml.template"
-    template = template_path.read_text()
+    template = template_path.read_text(encoding="utf-8")
 
     manifest = template.replace("{{PROJECT_SLUG}}", slug)
     manifest = manifest.replace("{{PROJECT_PATH}}", str(project_dir))
     manifest = manifest.replace("{{STRATEGY}}", strategy)
     class_name = slug.replace("-", " ").title().replace(" ", "") + "Agent"
     manifest = manifest.replace("{{CLASS_NAME}}", class_name)
-    agent_name = f"{slug}-bench"
-    manifest = manifest.replace("{{AGENT_NAME}}", agent_name)
+    manifest = manifest.replace("{{AGENT_NAME}}", f"{slug}-bench")
 
-    manifest_path.write_text(manifest)
+    manifest_path.write_text(manifest, encoding="utf-8")
 
     print(f"Benchmark inicializado em {bench_dir}/")
     print(f"  Estrategia detectada: {strategy}")
@@ -242,6 +515,7 @@ def cmd_init(args):
         print("  -> CLAUDE.md encontrado. Contexto sera injetado no prompt.")
     else:
         print("  -> Nenhuma chamada LLM detectada. Usando estrategia direta.")
+    print("  -> Opcional: habilite memory.enabled para gerar o wiki loop portatil.")
     print(f"\nProximo passo: edite {manifest_path}")
     print("  Preencha os campos marcados com TODO")
     print(f"  Depois: python {__file__} create-bench --bench-dir {bench_dir}")
@@ -263,22 +537,19 @@ def cmd_create_bench(args):
     project = cfg.get("project", {})
     agent = cfg.get("agent", {})
     benchmark = cfg.get("benchmark", {})
+    memory = _memory_defaults(agent, cfg.get("memory"))
 
     strategy = agent.get("strategy", "direct")
     if strategy not in VALID_STRATEGIES:
         print(f"ERRO: estrategia '{strategy}' invalida. Use: {VALID_STRATEGIES}")
         sys.exit(1)
 
-    # Selecionar template de agent
     template_name = f"agent_{strategy}.py.template"
     template_path = SCAFFOLD_DIR / "base" / template_name
     if not template_path.exists():
         print(f"ERRO: template {template_name} nao encontrado")
         sys.exit(1)
 
-    template = template_path.read_text()
-
-    # Substituicoes comuns
     slug = project.get("name", "myproject")
     class_name = agent.get(
         "class_name", slug.replace("-", " ").title().replace(" ", "") + "Agent"
@@ -293,75 +564,107 @@ def cmd_create_bench(args):
         "CLAUDE_TIMEOUT": str(agent.get("timeout", 300)),
         "CLAUDE_MAX_RETRIES": str(agent.get("max_retries", 3)),
         "PROJECT_DESCRIPTION": project.get("description", "Agent benchmark"),
+        "PROJECT_ROOT_PATH": project.get("path", ".."),
         "BACKEND": agent.get("backend", "cli"),
         "API_KEY_ENV": agent.get("api_key_env", "ANTHROPIC_API_KEY"),
         "BASE_URL": agent.get("base_url", ""),
     }
 
-    # System prompt
     system_prompt = agent.get("system_prompt", "")
-    if system_prompt:
-        replacements["SYSTEM_PROMPT"] = system_prompt
+    replacements["SYSTEM_PROMPT"] = system_prompt
 
-    # Estrategia-especificas
     if strategy == "monkeypatch":
-        mp = agent.get("monkeypatch", {})
-        replacements["PROJECT_ROOT_PATH"] = project.get("path", "..")
-        replacements["MODULES_PATH"] = mp.get("project_modules_path", "src")
-        replacements["LLM_FUNCTION"] = mp.get("llm_function", "_ask_claude")
+        monkeypatch = agent.get("monkeypatch", {})
+        replacements["MODULES_PATH"] = monkeypatch.get("project_modules_path", "src")
+        replacements["LLM_FUNCTION"] = monkeypatch.get("llm_function", "_ask_claude")
 
-        # Gerar ROLE_CONFIG e dispatch blocks a partir dos roles
-        roles = mp.get("roles", [])
+        roles = monkeypatch.get("roles", [])
+        role_config_lines = []
         if isinstance(roles, list):
-            role_config_lines = []
-            dispatch_blocks = []
             for role in roles:
                 if isinstance(role, dict):
-                    rname = role.get("name", "default")
-                    rmodel = role.get("model", "sonnet")
-                    rtimeout = role.get("timeout", 120)
+                    role_name = role.get("name", "default")
+                    role_model = role.get("model", "sonnet")
+                    role_timeout = role.get("timeout", 120)
                     role_config_lines.append(
-                        f'    "{rname}": {{"model": "{rmodel}", "timeout": {rtimeout}}},'
+                        f'    "{role_name}": {{"model": "{role_model}", "timeout": {role_timeout}}},'
                     )
-            replacements["ROLE_CONFIG_ENTRIES"] = "\n".join(role_config_lines)
+        replacements["ROLE_CONFIG_ENTRIES"] = "\n".join(role_config_lines)
 
     elif strategy == "context_inject":
-        ci = agent.get("context_inject", {})
-        context_files = ci.get("context_files", [])
+        context_inject = agent.get("context_inject", {})
+        context_files = context_inject.get("context_files", [])
         if isinstance(context_files, list):
-            cf_lines = [f'    "{f}",' for f in context_files if isinstance(f, str)]
-            replacements["CONTEXT_FILES_LIST"] = "\n".join(cf_lines)
-        replacements["INLINE_CONTEXT"] = ci.get("inline_context", "")
+            replacements["CONTEXT_FILES_LIST"] = "\n".join(
+                f'    "{path}",' for path in context_files if isinstance(path, str)
+            )
+        else:
+            replacements["CONTEXT_FILES_LIST"] = ""
+        replacements["INLINE_CONTEXT"] = context_inject.get("inline_context", "")
 
-    # Aplicar substituicoes (usa marcadores %%KEY%% para evitar conflito com $)
-    result = template
-    for key, val in replacements.items():
-        result = result.replace(f"%%{key}%%", str(val))
+    agent_result = _render_template(template_path, replacements)
+    (bench_dir / "agent.py").write_text(agent_result, encoding="utf-8")
 
-    # Escrever agent.py
-    agent_path = bench_dir / "agent.py"
-    agent_path.write_text(result)
+    dependencies = ['"harbor"']
+    backend = agent.get("backend", "cli")
+    if backend == "api":
+        dependencies.append('"anthropic"')
+    elif backend == "openai_compat":
+        dependencies.append('"openai"')
 
-    # pyproject.toml
-    pyproject = f'''[project]
+    deps_literal = ", ".join(dependencies)
+
+    pyproject = f"""[project]
 name = "{slug}-bench"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["harbor"]
+dependencies = [{deps_literal}]
 
 [tool.uv.sources]
 harbor = {{ git = "https://github.com/laude-institute/harbor" }}
-'''
-    (bench_dir / "pyproject.toml").write_text(pyproject)
+"""
+    (bench_dir / "pyproject.toml").write_text(pyproject, encoding="utf-8")
 
-    # results.tsv
     if not (bench_dir / "results.tsv").exists():
         (bench_dir / "results.tsv").write_text(
-            "timestamp\tcommit\tpassed\ttotal\tavg_score\tdescription\n"
+            "timestamp\tcommit\tpassed\ttotal\tavg_score\tdescription\n",
+            encoding="utf-8",
         )
 
-    # MISSION.md
-    mission = f"""# {slug} Benchmark — Missao
+    memory_section = ""
+    if memory["enabled"]:
+        _create_memory_loop_assets(bench_dir, project, agent, memory)
+        memory_section = f"""
+## Wiki loop opcional
+
+Arquivos gerados:
+- `wiki.py`
+- `{memory["wiki_dir"]}/`
+"""
+        if memory["sync_wiki_recall"]:
+            memory_section += """- `scripts/sync_wiki_recall.py`
+"""
+        memory_section += f"""
+
+Comandos uteis:
+
+```bash
+cd {bench_dir}
+python wiki.py lint
+"""
+        if memory["sync_wiki_recall"]:
+            memory_section += "python scripts/sync_wiki_recall.py --create\n"
+        memory_section += "```\n"
+        if memory["runtime_adapter"]["enabled"]:
+            memory_section += """
+Se voce conectar um adapter de runtime:
+
+```bash
+python scripts/sync_runtime_to_wiki.py --apply
+```
+"""
+
+    mission = f"""# {slug} Benchmark - Missao
 
 Projeto: {project.get("path", "?")}
 Estrategia: {strategy}
@@ -375,7 +678,7 @@ Maximizar o score no benchmark Harbor. Cada episodio:
 3. Melhorar o harness (agent.py acima do boundary)
 4. Rodar benchmark
 5. Registrar em results.tsv
-
+{memory_section}
 ## Como rodar
 
 ```bash
@@ -389,20 +692,26 @@ uv run harbor run -p tasks/ -n 1 --agent-import-path agent:{class_name} -o jobs 
 - Foco em melhorias genericas, nao hacks por task
 - Commitar apos cada melhoria confirmada
 """
-    (bench_dir / "MISSION.md").write_text(mission)
+    (bench_dir / "MISSION.md").write_text(mission, encoding="utf-8")
 
-    # .gitignore
-    gitignore = "jobs/\n__pycache__/\n*.pyc\n.venv/\n"
+    gitignore = "jobs/\n__pycache__/\n*.pyc\n.venv/\ndata/\n"
     gitignore_path = bench_dir / ".gitignore"
     if not gitignore_path.exists():
-        gitignore_path.write_text(gitignore)
+        gitignore_path.write_text(gitignore, encoding="utf-8")
 
     print(f"Benchmark criado em {bench_dir}/")
     print(f"  agent.py ({strategy})")
-    print(f"  pyproject.toml")
-    print(f"  MISSION.md")
-    print(f"  results.tsv")
-    print(f"\nProximo passo: adicione tasks com:")
+    print("  pyproject.toml")
+    print("  MISSION.md")
+    print("  results.tsv")
+    if memory["enabled"]:
+        print("  wiki.py + wiki/ (wiki loop opcional)")
+        if memory["sync_wiki_recall"]:
+            print("  scripts/sync_wiki_recall.py")
+        if memory["runtime_adapter"]["enabled"]:
+            print(f"  {memory['runtime_adapter']['export_script']} (stub de adapter)")
+            print("  scripts/sync_runtime_to_wiki.py")
+    print("\nProximo passo: adicione tasks com:")
     print(
         f"  python {__file__} add-task <nome> --verifier <tipo> --bench-dir {bench_dir}"
     )
@@ -441,16 +750,14 @@ def cmd_add_task(args):
     slug = project.get("name", "myproject")
     difficulty = args.difficulty or "medium"
 
-    # task.toml
-    task_toml = f'''[task]
+    task_toml = f"""[task]
 name = "{slug}/{task_name}"
 description = "TODO: descreva esta task"
 timeout = 360
 difficulty = "{difficulty}"
-'''
-    (task_dir / "task.toml").write_text(task_toml)
+"""
+    (task_dir / "task.toml").write_text(task_toml, encoding="utf-8")
 
-    # instruction.md
     instruction_templates = {
         "json_schema": "TODO: Escreva a instrucao que pede ao agente gerar um JSON com estrutura especifica.\n\nDica: especifique os campos obrigatorios, tipos, e formato esperado.",
         "structured_text": "TODO: Escreva a instrucao que pede ao agente retornar texto com labels especificos.\n\nDica: use formato 'Label: valor' para facilitar extracao pelo verifier.",
@@ -459,9 +766,10 @@ difficulty = "{difficulty}"
         "markdown_sections": "TODO: Escreva a instrucao que pede um texto estruturado em markdown.\n\nDica: especifique as secoes obrigatorias (## Titulo) e requisitos de conteudo.",
         "keyword_pattern": "TODO: Escreva a instrucao que pede ao agente gerar output com padroes especificos.\n\nDica: liste os padroes/keywords que devem estar presentes no output.",
     }
-    (task_dir / "instruction.md").write_text(instruction_templates[verifier])
+    (task_dir / "instruction.md").write_text(
+        instruction_templates[verifier], encoding="utf-8"
+    )
 
-    # test.sh — copiar template do verifier
     verifier_template = SCAFFOLD_DIR / "verifiers" / f"{verifier}.sh.template"
     if verifier_template.exists():
         shutil.copy2(verifier_template, task_dir / "tests" / "test.sh")
@@ -472,24 +780,23 @@ difficulty = "{difficulty}"
         )
         _write_basic_verifier(task_dir / "tests" / "test.sh")
 
-    # Dockerfile
     dockerfile_preset = benchmark.get("dockerfile_preset", "minimal")
     dockerfile_src = SCAFFOLD_DIR / "dockerfiles" / f"{dockerfile_preset}.Dockerfile"
     if dockerfile_src.exists():
         shutil.copy2(dockerfile_src, task_dir / "environment" / "Dockerfile")
     else:
-        # Fallback minimal
         (task_dir / "environment" / "Dockerfile").write_text(
-            "FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y bc python3 && rm -rf /var/lib/apt/lists/*\n"
+            "FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y bc python3 && rm -rf /var/lib/apt/lists/*\n",
+            encoding="utf-8",
         )
 
     print(f"Task criada: {task_dir}/")
     print(f"  Verifier: {verifier}")
     print(f"  Dockerfile: {dockerfile_preset}")
-    print(f"\nPreencha:")
-    print(f"  1. {task_dir / 'instruction.md'} — a instrucao da task")
-    print(f"  2. {task_dir / 'tests' / 'test.sh'} — valores esperados nos TODOs")
-    print(f"  3. {task_dir / 'task.toml'} — description")
+    print("\nPreencha:")
+    print(f"  1. {task_dir / 'instruction.md'} - a instrucao da task")
+    print(f"  2. {task_dir / 'tests' / 'test.sh'} - valores esperados nos TODOs")
+    print(f"  3. {task_dir / 'task.toml'} - description")
 
 
 def _write_basic_verifier(path: Path):
@@ -513,8 +820,21 @@ TOTAL=1  # TODO: ajuste o total de checks
 
 echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"
 """
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     os.chmod(path, 0o755)
+
+
+def _validate_python_file(path: Path, ok: list[str], errors: list[str]) -> None:
+    if not path.exists():
+        errors.append(f"{path.name} NAO encontrado")
+        return
+
+    ok.append(f"{path.name} encontrado")
+    try:
+        ast.parse(path.read_text(encoding="utf-8"))
+        ok.append(f"{path.name}: sintaxe Python valida")
+    except SyntaxError as exc:
+        errors.append(f"{path.name}: erro de sintaxe linha {exc.lineno}: {exc.msg}")
 
 
 # ============================================================
@@ -522,17 +842,17 @@ echo "scale=2; $SCORE / $TOTAL" | bc > "$REWARD_FILE"
 # ============================================================
 def cmd_doctor(args):
     bench_dir = Path(args.bench_dir).resolve()
-    errors = []
-    warnings = []
-    ok = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    ok: list[str] = []
 
-    # 1. Manifest
     manifest_path = bench_dir / "manifest.yaml"
     if manifest_path.exists():
         ok.append("manifest.yaml encontrado")
         cfg = _parse_yaml(manifest_path)
         project = cfg.get("project", {})
         agent = cfg.get("agent", {})
+        memory = _memory_defaults(agent, cfg.get("memory"))
 
         if not project.get("name"):
             errors.append("manifest: project.name vazio")
@@ -542,71 +862,108 @@ def cmd_doctor(args):
             errors.append(f"manifest: agent.strategy invalida: {agent.get('strategy')}")
         else:
             ok.append(f"estrategia: {agent.get('strategy')}")
+        backend = agent.get("backend", "cli")
+        if backend not in VALID_BACKENDS:
+            errors.append(f"manifest: agent.backend invalido: {backend}")
+        else:
+            ok.append(f"backend: {backend}")
     else:
         errors.append("manifest.yaml NAO encontrado")
         cfg = {}
+        agent = {}
+        memory = _memory_defaults(agent, {})
 
-    # 2. agent.py
     agent_path = bench_dir / "agent.py"
+    _validate_python_file(agent_path, ok, errors)
     if agent_path.exists():
-        ok.append("agent.py encontrado")
-        try:
-            ast.parse(agent_path.read_text())
-            ok.append("agent.py: sintaxe Python valida")
-        except SyntaxError as e:
-            errors.append(f"agent.py: erro de sintaxe linha {e.lineno}: {e.msg}")
-
-        content = agent_path.read_text()
+        content = agent_path.read_text(encoding="utf-8")
         if "HARBOR ADAPTER" in content:
             ok.append("agent.py: boundary HARBOR ADAPTER presente")
         else:
             warnings.append("agent.py: boundary HARBOR ADAPTER nao encontrado")
-    else:
-        errors.append("agent.py NAO encontrado (rode create-bench)")
+        if "%%" in content:
+            warnings.append("agent.py: placeholders nao resolvidos detectados")
 
-    # 3. pyproject.toml
     if (bench_dir / "pyproject.toml").exists():
         ok.append("pyproject.toml encontrado")
     else:
         warnings.append("pyproject.toml nao encontrado")
 
-    # 4. Tasks
     tasks_dir = bench_dir / "tasks"
     if tasks_dir.exists():
-        task_dirs = [d for d in tasks_dir.iterdir() if d.is_dir()]
+        task_dirs = [path for path in tasks_dir.iterdir() if path.is_dir()]
         if task_dirs:
             ok.append(f"{len(task_dirs)} task(s) encontrada(s)")
-            for td in task_dirs:
-                tname = td.name
+            for task_dir in task_dirs:
+                task_name = task_dir.name
                 required = [
-                    td / "task.toml",
-                    td / "instruction.md",
-                    td / "tests" / "test.sh",
-                    td / "environment" / "Dockerfile",
+                    task_dir / "task.toml",
+                    task_dir / "instruction.md",
+                    task_dir / "tests" / "test.sh",
+                    task_dir / "environment" / "Dockerfile",
                 ]
-                for req in required:
-                    if not req.exists():
-                        errors.append(f"task {tname}: faltando {req.name}")
+                for required_path in required:
+                    if not required_path.exists():
+                        errors.append(f"task {task_name}: faltando {required_path.name}")
 
-                # Validar test.sh
-                test_sh = td / "tests" / "test.sh"
+                test_sh = task_dir / "tests" / "test.sh"
                 if test_sh.exists():
-                    content = test_sh.read_text()
+                    content = test_sh.read_text(encoding="utf-8")
                     if "REWARD_FILE" not in content:
-                        errors.append(f"task {tname}: test.sh nao escreve REWARD_FILE")
+                        errors.append(f"task {task_name}: test.sh nao escreve REWARD_FILE")
                     if not os.access(test_sh, os.X_OK):
-                        warnings.append(f"task {tname}: test.sh nao eh executavel")
+                        warnings.append(f"task {task_name}: test.sh nao eh executavel")
 
-                # Validar instruction.md nao eh so TODO
-                inst = td / "instruction.md"
-                if inst.exists() and inst.read_text().strip().startswith("TODO"):
-                    warnings.append(f"task {tname}: instruction.md ainda eh TODO")
+                instruction = task_dir / "instruction.md"
+                if instruction.exists() and instruction.read_text(
+                    encoding="utf-8"
+                ).strip().startswith("TODO"):
+                    warnings.append(f"task {task_name}: instruction.md ainda eh TODO")
         else:
             warnings.append("Nenhuma task criada ainda")
     else:
         warnings.append("Diretorio tasks/ nao existe")
 
-    # Report
+    if memory["enabled"]:
+        wiki_py = bench_dir / "wiki.py"
+        _validate_python_file(wiki_py, ok, errors)
+
+        wiki_dir = bench_dir / memory["wiki_dir"]
+        if wiki_dir.exists():
+            ok.append(f"{memory['wiki_dir']}/ encontrado")
+        else:
+            errors.append(f"{memory['wiki_dir']}/ NAO encontrado")
+
+        for relative in ("SCHEMA.md", "index.md", "log.md"):
+            path = wiki_dir / relative
+            if path.exists():
+                ok.append(f"{memory['wiki_dir']}/{relative} encontrado")
+            else:
+                errors.append(f"{memory['wiki_dir']}/{relative} NAO encontrado")
+
+        pages_dir = wiki_dir / "pages"
+        if pages_dir.exists():
+            ok.append(f"{memory['wiki_dir']}/pages encontrado")
+        else:
+            errors.append(f"{memory['wiki_dir']}/pages NAO encontrado")
+
+        if memory["sync_wiki_recall"]:
+            sync_wiki = bench_dir / "scripts" / "sync_wiki_recall.py"
+            _validate_python_file(sync_wiki, ok, errors)
+
+        if memory["runtime_adapter"]["enabled"]:
+            export_script = bench_dir / memory["runtime_adapter"]["export_script"]
+            _validate_python_file(export_script, ok, errors)
+            sync_runtime = bench_dir / "scripts" / "sync_runtime_to_wiki.py"
+            _validate_python_file(sync_runtime, ok, errors)
+
+            if export_script.exists() and "TODO" in export_script.read_text(
+                encoding="utf-8"
+            ):
+                warnings.append(
+                    "runtime adapter ainda eh stub TODO; falta ligar ao projeto real"
+                )
+
     print(f"\n{'=' * 50}")
     print(f"  harbor-scaffold doctor: {bench_dir}")
     print(f"{'=' * 50}\n")
@@ -622,9 +979,9 @@ def cmd_doctor(args):
     if errors:
         print(f"  {len(errors)} erro(s), {len(warnings)} aviso(s)")
         sys.exit(1)
-    else:
-        print(f"  Tudo certo! {len(warnings)} aviso(s)")
-        sys.exit(0)
+
+    print(f"  Tudo certo! {len(warnings)} aviso(s)")
+    sys.exit(0)
 
 
 # ============================================================
@@ -632,16 +989,14 @@ def cmd_doctor(args):
 # ============================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="harbor-scaffold — gerador portatil de benchmarks Harbor",
+        description="harbor-scaffold - gerador portatil de benchmarks Harbor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", help="Subcomandos")
 
-    # init
     p_init = sub.add_parser("init", help="Inicializa benchmark para um projeto")
     p_init.add_argument("project_dir", help="Diretorio raiz do projeto alvo")
 
-    # create-bench
     p_create = sub.add_parser(
         "create-bench", help="Gera agent.py e estrutura do benchmark"
     )
@@ -649,7 +1004,6 @@ def main():
         "--bench-dir", default=".", help="Diretorio do benchmark (default: .)"
     )
 
-    # add-task
     p_task = sub.add_parser("add-task", help="Adiciona task skeleton")
     p_task.add_argument("name", help="Nome da task (ex: json-validacao)")
     p_task.add_argument(
@@ -665,7 +1019,6 @@ def main():
         "--bench-dir", default=".", help="Diretorio do benchmark (default: .)"
     )
 
-    # doctor
     p_doctor = sub.add_parser("doctor", help="Valida manifest e estrutura do benchmark")
     p_doctor.add_argument(
         "--bench-dir", default=".", help="Diretorio do benchmark (default: .)"

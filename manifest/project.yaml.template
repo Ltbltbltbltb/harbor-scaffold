@@ -16,15 +16,15 @@ agent:
   max_retries: 3
 
   # LLM backend: cli | api | openai_compat
-  # cli: uses `claude -p` CLI (works with Claude Max subscription, no API key required)
-  # api: uses Anthropic Python SDK (requires ANTHROPIC_API_KEY)
-  # openai_compat: uses OpenAI-compatible SDK (requires base_url + api_key_env)
+  # cli: usa `claude -p` como subprocesso
+  # api: usa Anthropic Python SDK
+  # openai_compat: usa endpoint compativel com OpenAI
   backend: "cli"
-  # api_key_env: "ANTHROPIC_API_KEY"     # for backend: api
-  # base_url: "https://api.openai.com/v1"  # for backend: openai_compat
-  # api_key_env: "OPENAI_API_KEY"          # for backend: openai_compat
+  # api_key_env: "ANTHROPIC_API_KEY"       # para backend: api
+  # base_url: "https://api.openai.com/v1"  # para backend: openai_compat
+  # api_key_env: "OPENAI_API_KEY"          # para backend: openai_compat
 
-  # System prompt (used by direct and context_inject; monkeypatch uses the project's own prompts)
+  # System prompt (usado por direct e context_inject; monkeypatch usa prompt do projeto)
   system_prompt: |
     TODO: escreva o system prompt base para o agente.
     Este eh o principal ponto de otimizacao do meta-agente.
@@ -58,3 +58,21 @@ agent:
 benchmark:
   dockerfile_preset: "minimal"  # minimal | jq | custom
   # custom_packages: ["nodejs", "curl"]  # so para preset custom
+
+# === Memory loop opcional (wiki estilo Karpathy + wiki-recall) ===
+memory:
+  enabled: false
+  wiki_dir: "wiki"
+  language: "pt-BR"
+  selector_model: "claude-sonnet-4-6"
+  writer_model: "claude-sonnet-4-6"
+  max_context_chars: 4000
+  sync_wiki_recall: true
+  min_page_chars: 500
+  max_pairs_per_page: 2
+
+  # Optional: gera apenas o protocolo/stub.
+  # Voce precisa adaptar a extracao real do runtime do projeto.
+  runtime_adapter:
+    enabled: false
+    export_script: "scripts/export_runtime_events.py"

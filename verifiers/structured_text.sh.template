@@ -1,5 +1,6 @@
 #!/bin/bash
 # Verifier: structured_text — extrai valores de labels no output
+# Baseado em um padrao generico de output rotulado
 # Formato esperado no output: "Label: valor"
 # NOTA: grep -P (Perl regex) NAO disponivel no Docker minimal. Use python3 para extracoes complexas.
 

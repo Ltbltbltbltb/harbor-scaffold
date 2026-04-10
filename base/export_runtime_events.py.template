@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Project-specific adapter for the harbor-scaffold wiki loop.
+
+Contract:
+    export_events() -> list[dict]
+
+Each dict should contain:
+- event_id: stable unique id
+- topic: short topic or query label
+- summary: concise summary of what happened
+- facts: optional list of dicts or strings
+- sources: optional list of dicts or strings
+"""
+
+from pathlib import Path
+
+
+def export_events() -> list[dict]:
+    project_root = Path(__file__).resolve().parents[1]
+
+    # TODO: Replace this stub with project-specific extraction logic.
+    # Examples:
+    # - read a SQLite database
+    # - parse JSONL logs
+    # - inspect saved reports from the runtime
+    # - call project code that already exposes completed events
+    _ = project_root
+    return []
+
+
+if __name__ == "__main__":
+    import json
+
+    print(json.dumps(export_events(), ensure_ascii=False, indent=2))

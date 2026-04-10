@@ -1,0 +1,40 @@
+# Project Wiki Schema
+
+## Purpose
+This wiki accumulates durable project knowledge between benchmark runs and
+runtime sessions. Each page should capture stable takeaways that are worth
+reusing later.
+
+## Files
+- `index.md` - master list of pages and covered topics
+- `log.md` - append-only change log
+- `pages/*.md` - one page per topic cluster
+
+## Page Shape
+```
+# Topic Title
+
+_Last updated: YYYY-MM-DD | Events: N_
+
+## Summary
+2-3 paragraphs with the current high-confidence view.
+
+## Key Facts
+- [HIGH] Confirmed by multiple events or sources
+- [MEDIUM] Supported by one strong event or source
+- [LOW] Tentative or weakly supported
+
+## Open Questions
+- What still needs validation?
+
+## Source Trail
+| Date | Event ID | Contribution |
+|------|----------|--------------|
+```
+
+## Rules
+1. Prefer updating an existing page over creating a near-duplicate.
+2. Preserve conflicts and uncertainty instead of flattening them away.
+3. Keep `index.md` and `log.md` aligned with page changes.
+4. Write pages in %%WIKI_LANGUAGE%% unless the project requires another language.
+5. Never write files outside `index.md`, `log.md`, or `pages/*.md`.
